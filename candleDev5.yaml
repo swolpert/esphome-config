@@ -1,0 +1,440 @@
+---
+
+#
+#  Trick #1 - dynamic sleep duration
+#  
+#  Since startup, wifi, sensor, and HA sync take anywhere from 2 seconds to 12.
+#  So to achieve a 60s or 600s loop we dynamically adjust how long to sleep
+#
+globals:
+  # - id: delay_int
+    # type: int
+    # restore_value: no
+    # initial_value: '99999'
+
+  - id: mqtt_done_switch
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: adc_done_switch
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: mqtt_done_sleep_interval
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: latest_light_state
+    type: std::string
+    restore_value: no
+    initial_value: '"none"'
+    
+  - id: sleep_interval
+    type: std::string
+    restore_value: no
+    initial_value: '"none"'
+
+esphome:
+  name: ${dev_name}
+  friendly_name: ${dev_friendly_name}
+  
+  on_boot:
+    - priority: 700
+      then: 
+        - output.turn_on: debug_gpio
+        - logger.log: "debug_gpio turned ON"
+        # - deep_sleep.prevent: deep_sleep1
+
+    - priority: -101
+      then:
+        - lambda: |-
+            if (sntp_time != nullptr) {
+              sntp_time->update();
+              ESP_LOGD("on_boot", "SNTPComponent update called.");
+            } else {
+              ESP_LOGE("on_boot", "SNTPComponent is not initialized.");
+            }
+        # - logger.log: "on_boot: ds1307.read_time"
+        # - ds1307.read_time:
+        #     id: ds1307_time
+        - component.update: adc_batt_voltage
+        - logger.log: "on_boot: consider_deep_sleep..."
+        - script.execute: consider_deep_sleep
+
+# # To remove ota password...
+# # Must put password in .base.yaml ota: section
+  # on_boot:
+    # - lambda: |-
+        # id(ota_id).set_auth_password("");
+
+esp32:
+  board: dfrobot_beetle_esp32c3
+  variant: esp32c3
+  framework:
+    type: arduino
+
+# binary_sensor:
+
+# api:
+
+mqtt:
+  broker: 192.168.1.200
+  username: !secret mqtt_user
+  password: !secret mqtt_password
+  discovery: true
+
+  # birth_message: # blank
+  # will_message: # blank
+  # topic_prefix: "${dev_name}"
+  # # IF topic_prefix, all candles will all use the share topic!
+  # topic_prefix: "candles"
+  # log_topic: "${dev_name}/debug"
+  # birth_message:
+    # topic: ${dev_name}/status
+    # payload: online
+  # will_message:
+    # topic: ${dev_name}/status
+    # payload: offline
+
+  on_json_message:
+  - topic: "candles/led"
+    then:
+      - lambda: |-
+          // Log the full incoming JSON message
+          std::string json_string;
+          serializeJson(x, json_string);  // Use 'x' as the JsonObject
+          ESP_LOGD("mqtt", "on_json_message: received candles/led JSON message: %s", json_string.c_str());
+
+          LightState *lightState = rgbw_led;  // Implicit cast since AddressableLightState is derived from LightState
+
+          LightCall call = lightState->make_call();
+
+          // Create a mutable JsonObject and copy the contents of 'x' (a JsonObjectConst)
+          DynamicJsonDocument doc(1024); // Adjust size as needed
+          JsonObject obj = doc.to<JsonObject>();
+          obj.set(x);  // Set the content of the mutable JsonObject to the content of x
+
+          // Pass the mutable JsonObject to parse_json
+          LightJSONSchema::parse_json(*lightState, call, obj);
+
+          call.perform();
+
+          id(latest_light_state) = json_string.c_str();  // Store the latest message in a global variable
+      - logger.log: "on_json_message: consider_deep_sleep"
+      - script.execute: consider_deep_sleep
+
+  on_message:
+
+  - topic: "candles/sleep_interval"
+    then:
+      - lambda: |-
+          id(sleep_interval) = x.c_str();  // Store the latest message in a global variable
+          ESP_LOGD("mqtt", "Received candles/sleep_interval: %s", id(sleep_interval).c_str());  // Log the message
+      - globals.set:
+          id: mqtt_done_sleep_interval
+          value: 'true'
+      - logger.log: "candles/sleep_interval: consider_deep_sleep"
+      - script.execute: consider_deep_sleep
+
+light:
+  - platform: monochromatic
+    output: blue_led_pwm
+    id: blue_led_light
+    name: "Blue LED"
+    restore_mode: ALWAYS_ON
+    internal: true
+    disabled_by_default: true
+    effects:
+      - pulse:
+      - pulse:
+          name: "Custom Pulse"
+          transition_length: 1.5s
+          update_interval: 1.5s
+          min_brightness: 10%
+          max_brightness: 85%
+    on_turn_on:
+      then:
+        - light.turn_on:
+            id: blue_led_light
+            effect: "Custom Pulse"
+
+  - platform: neopixelbus
+    id: rgbw_led
+    name: "Candle"
+    icon: mdi:candle
+    type: GRBW
+    variant: SK6812
+    pin: GPIO0
+    num_leds: 1
+    default_transition_length: 0s
+    # internal: true # if set to internal, then mqtt cannot control?
+    # disabled_by_default: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    # color_correct: [100%, 100%, 100%, 100%]
+    # color_correct: [1%, 0%, 0%, 10%]
+    effects:
+      - flicker:
+      - flicker:
+          name: "Custom Flicker"
+          alpha: 95%
+          intensity: 5%
+          # update_interval: 250ms
+
+  # - platform: esp32_rmt_led_strip
+  #   id: rgbw_led
+  #   rgb_order: GRB
+  #   is_rgbw: true
+  #   pin: GPIO21
+  #   num_leds: 1
+  #   rmt_channel: 0
+  #   chipset: SK6812
+  #   name: "Candle"
+  #   icon: mdi:candle
+  #   default_transition_length: 0s
+  #   restore_mode: RESTORE_DEFAULT_OFF
+  #   effects:
+  #     - flicker:
+  #     - flicker:
+  #         name: "Custom Flicker"
+  #         alpha: 95%
+  #         intensity: 5%
+  #         # update_interval: 250ms
+
+# for PWM status led:
+output:
+  - platform: ledc
+    id: blue_led_pwm
+    pin: GPIO8
+    inverted: true
+    min_power: 0%
+    max_power: 100%
+
+  - platform: gpio
+    pin: GPIO10
+    id: debug_gpio
+
+sensor:
+  - platform: adc
+    pin: GPIO3
+    id: adc_batt_voltage
+    name: "Battery Voltage"
+    update_interval: 60s
+    attenuation: 12db
+    #disabled_by_default: true
+    entity_category: diagnostic
+    on_value:
+      then:
+        - logger.log: "ADC sampled battery voltage"
+        - globals.set:
+            id: adc_done_switch
+            value: 'true'
+
+deep_sleep:
+  id: deep_sleep1
+  run_duration: 5s
+  sleep_duration: 5s # something went wrong, so sleep a short amount of time to reset and try again
+
+interval:
+  - interval: 12s
+  # - interval: 1.2s
+    then:
+      - logger.log: "interval: consider_deep_sleep"
+      - script.execute: consider_deep_sleep
+
+script:
+
+  - id: set_ds3231_alarm
+    mode: queued
+    then:
+      - logger.log: "Setting ds3231 alarm to sunset..."
+      - lambda: |-
+          // Helper function for BCD conversion
+          auto decimal_to_bcd = [](uint8_t val) -> uint8_t {
+            return ((val / 10) << 4) | (val % 10);
+          };
+
+          // Get the sunset time
+          auto sunset = id(sunset_time).state;
+          if (sunset.empty()) {
+            ESP_LOGW("Sun", "Sunset time is unavailable.");
+            return;
+          }
+
+          struct tm t = {};
+          if (!strptime(sunset.c_str(), "%H:%M:%S", &t)) {
+            ESP_LOGW("Sun", "Failed to parse sunset time: %s", sunset.c_str());
+            return;
+          }
+
+          // Convert to ESPTime
+          time_t dummy_time = 0;  // The second argument can be ignored for our purpose
+          ESPTime sunset_time = ESPTime::from_c_tm(&t, dummy_time);
+
+          uint8_t seconds_bcd = decimal_to_bcd(sunset_time.second);
+          uint8_t minutes_bcd = decimal_to_bcd(sunset_time.minute);
+          uint8_t hours_bcd = decimal_to_bcd(sunset_time.hour);
+
+          // Write the sunset time to the DS3231 alarm registers
+          Wire.beginTransmission(0x68);
+          Wire.write(0x07);  // Start at Alarm1 seconds register
+          Wire.write(seconds_bcd & 0x7F);  // A1M1=0: Match exact second
+          Wire.write(minutes_bcd & 0x7F);  // A1M2=0: Match exact minute
+          Wire.write(hours_bcd & 0x7F);    // A1M3=0: Match exact hour
+          Wire.write(0x80);                // A1M4=1: Match any day
+          Wire.endTransmission();
+
+          // Enable Alarm1 interrupt
+          Wire.beginTransmission(0x68);
+          Wire.write(0x0E);  // Control register
+          Wire.write(0x05);  // INTCN=1 (enable interrupt), A1IE=1 (enable Alarm1)
+          Wire.endTransmission();
+
+          ESP_LOGI("DS3231", "Alarm set for sunset at %02d:%02d:%02d.",
+                  sunset_time.hour, sunset_time.minute, sunset_time.second);
+
+  - id: consider_deep_sleep
+    mode: queued
+    then:
+      - logger.log: "Running consider_deep_sleep..."
+      - lambda: |-
+          ESP_LOGD("stefan", "light_mqtt_value: %s",         id(latest_light_state).c_str() );
+          ESP_LOGD("stefan", "mqtt_done_sleep_interval: %d", id(mqtt_done_sleep_interval)   );
+          ESP_LOGD("stefan", "adc_done_switch: %d",          id(adc_done_switch)            );
+          if ( id(latest_light_state).c_str()!="none" && id(mqtt_done_sleep_interval) && id(adc_done_switch) ) {
+            ESP_LOGD("stefan", "*** consider_deep_sleep is TRUE!  ***");
+            //if ( strncmp( id(sleep_interval).state.c_str(), "always on", 9) == 0 ) {
+            if ( strncmp( id(sleep_interval).c_str(), "always on", 9) == 0 ) {
+              id(deep_sleep1).prevent_deep_sleep();
+              ESP_LOGD("stefan", "sleep_interval is always on (for OTA)");
+            }
+            else {
+              //const char *time_str = id(sleep_interval).state.c_str();
+              const char *time_str = id(sleep_interval).c_str();
+              uint32_t value = 0;
+              char unit = '\0';
+              // ESP_LOGD("stefan", "sleep_duration string: %s", *time_str );
+
+              // Skip leading spaces
+              while (*time_str && isspace(*time_str)) {
+                  time_str++;
+              }
+
+              // Extract numeric value
+              while (*time_str != '\0' && isdigit(*time_str)) {
+                  value = value * 10 + (*time_str - '0');
+                  time_str++;
+              }
+
+              // Skip any spaces between the number and unit
+              while (*time_str && isspace(*time_str)) {
+                  time_str++;
+              }
+
+              // Extract the first letter of the unit (h for hours, m for minutes, s for seconds)
+              if (*time_str != '\0') {
+                  // unit = tolower(*time_str);  // Convert to lowercase to handle case insensitivity
+                  unit = *time_str;  // Convert to lowercase to handle case insensitivity
+              }
+
+              // If no valid unit was found, return an error value (-1)
+              if (unit == '\0') {
+                  value = 0;  // Invalid format
+              }
+
+              ESP_LOGD("stefan", "unit character: %c", unit );
+              // Convert the time based on the unit
+              switch (unit) {
+                  case 'h':  // hours
+                  case 'H':
+                      value *= 3600;  // 1 hour = 3600 seconds
+                      break;  // don't fall-through
+                  case 'm':  // minutes
+                  case 'M':
+                      value *= 60;   // 1 minute = 60 seconds
+                      break;
+                  case 's':  // seconds
+                  case 'S':
+                      value = value;  // already in seconds
+                      break;
+                  default:
+                      value = 0;
+                      break;
+              }
+
+              ESP_LOGD("stefan", "parsed sleep_duration of %d seconds", value );
+              if (value > 0) {
+                ESP_LOGD("stefan", "debug_gpio turned OFF");
+                id(debug_gpio).turn_off();
+                
+                id(deep_sleep1).allow_deep_sleep();
+                id(deep_sleep1).set_run_duration(0);
+                id(deep_sleep1).set_sleep_duration(value * 1000);
+                id(deep_sleep1).begin_sleep();
+              }
+            }
+          }
+          else {
+            ESP_LOGD("stefan", "*** consider_deep_sleep is FALSE! ***");
+          }
+
+i2c:
+  sda: GPIO4
+  scl: GPIO5
+  scan: true
+  id: i2c_device
+
+time:
+  - platform: ds1307
+    id: ds1307_time
+    update_interval: never
+    
+  - platform: sntp
+    id: sntp_time
+    timezone: America/New_York
+    servers:
+     - 192.168.1.1
+     - 0.pool.ntp.org
+     - 1.pool.ntp.org
+    update_interval: never
+    on_time_sync:
+      then:
+        # ... and update the RTC when the synchronization was successful
+        - ds1307.write_time:
+            id: ds1307_time
+          # - logger.log: "Wrote SNTP time to RTC"
+          # - logger.log: it.strftime(0, 0, id(font), "%Y-%m-%d %H:%M", id(sntp_time).now());"
+        - lambda: |-          
+            char str[30];
+            time_t currTime = id(sntp_time).now().timestamp;
+            strftime(str, sizeof(str), "%Y-%m-%d %H:%M", localtime(&currTime));
+            ESP_LOGD("stefan", "Wrote SNTP time to RTC, curTime: %s", str);
+
+            if (ds1307_time != nullptr) {
+              ds1307_time->dump_config();
+              ds1307_time->setup(); // setup() basically only does read_rtc_()
+              ESP_LOGD("stefan", "DS1307Component setup() called.");
+            } else {
+              ESP_LOGE("stefan", "DS1307Component is not initialized.");
+            }
+        - script.execute: set_ds3231_alarm
+        - lambda: |-
+            if (ds1307_time != nullptr) {
+              ds1307_time->setup(); // setup() basically only does read_rtc_()
+              ESP_LOGD("stefan", "DS1307Component setup() called.");
+            } else {
+              ESP_LOGE("stefan", "DS1307Component is not initialized.");
+            }
+
+sun:
+  latitude: 42.4165986
+  longitude: -71.1567342
+
+text_sensor:
+  - platform: sun
+    name: Sun Next Sunset
+    type: sunset
+    id: sunset_time
+    internal: true

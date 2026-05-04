@@ -1,0 +1,409 @@
+---
+
+#
+#  Trick #1 - dynamic sleep duration
+#  
+#  Since startup, wifi, sensor, and HA sync take anywhere from 2 seconds to 12.
+#  So to achieve a 60s or 600s loop we dynamically adjust how long to sleep
+#
+globals:
+  # - id: delay_int
+    # type: int
+    # restore_value: no
+    # initial_value: '99999'
+  - id: mqtt_done_switch
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+    
+# we can rely on HA time since we only use it after sensor succesfully publishes (successfully talked to HA)
+time:
+  - platform: homeassistant
+    id: homeassistant_time
+
+esphome:
+  name: ${dev_name}
+  friendly_name: ${dev_friendly_name}
+# # To remove ota password...
+# # Must put password in .base.yaml ota: section
+  # on_boot:
+    # - lambda: |-
+        # id(ota_id).set_auth_password("");
+
+esp32:
+  board: dfrobot_beetle_esp32c3
+  variant: esp32c3
+  framework:
+    type: arduino
+
+binary_sensor:
+  - platform: status
+    #name: "${dev_friendly_name} Connectivity"
+    name: "Connectivity"
+    disabled_by_default: true
+    entity_category: diagnostic
+
+  - platform: gpio
+    id: button_id
+    # name: BOOT0 Button
+    internal: true
+    filters:
+      - delayed_on: 10ms
+    pin:
+      number: GPIO9
+      inverted: true
+      mode:
+        input: true
+        pullup: false
+    on_press:
+      then:
+        - logger.log: "Button BOOT0 pressed"
+        - switch.toggle: switch1
+
+# interval:
+#   - interval: 10s
+#     then:
+#       - light.toggle: blue_led_pulse
+
+mqtt:
+  broker: 192.168.1.200
+  username: !secret mqtt_user
+  password: !secret mqtt_password
+  discovery: false
+  birth_message:
+    topic: ${dev_name}/status/availability
+    payload: online
+  will_message:
+    topic: ${dev_name}/status/availability
+    payload: offline
+  on_message:
+  # - topic: candles/ota_prevent_sleep
+    # payload: 'ON'
+    # then:
+      # - deep_sleep.prevent: deep_sleep1
+  # - topic: candles/ota_prevent_sleep
+    # payload: 'OFF'
+    # then:
+      # - deep_sleep.prevent: deep_sleep1
+  - topic: candles/switch
+    payload: 'ON'
+    then:
+      - switch.turn_on: switch1
+      - globals.set:
+          id: mqtt_done_switch
+          value: 'true'
+  - topic: candles/switch
+    payload: 'OFF'
+    then:
+      - switch.turn_off: switch1
+      - globals.set:
+          id: mqtt_done_switch
+          value: 'true'
+
+light:
+  - platform: monochromatic
+    output: blue_led_pwm
+    id: blue_led_light
+    name: "Blue LED"
+    restore_mode: ALWAYS_ON
+    effects:
+      - pulse:
+      - pulse:
+          name: "Custom Pulse"
+          transition_length: 1.5s
+          update_interval: 1.5s
+          min_brightness: 10%
+          max_brightness: 85%
+
+      # - pulse:
+      #     name: "Slow Pulse"
+      #     transition_length: 500ms
+      #     update_interval: 2s
+      # - pulse:
+      #     name: "Asymmetrical Pulse"
+      #     transition_length:
+      #       on_length: 1s
+      #       off_length: 500ms
+      #     update_interval: 1.5s
+    on_turn_on:
+      then:
+        - light.turn_on:
+            id: blue_led_light
+            effect: "Custom Pulse"
+
+  - platform: neopixelbus
+    id: rgbw_led
+    name: "Candle"
+    icon: mdi:candle
+    type: GRBW
+    variant: SK6812
+    pin: GPIO21
+    num_leds: 1
+    restore_mode: RESTORE_DEFAULT_OFF
+    # color_correct: [100%, 100%, 100%, 100%]
+    # color_correct: [1%, 0%, 0%, 10%]
+    effects:
+      - flicker:
+      - flicker:
+          name: "Custom Flicker"
+          alpha: 95%
+          intensity: 5%
+          # update_interval: 250ms
+
+# for PWM status led:
+output:
+  - platform: ledc
+    id: blue_led_pwm
+    pin: GPIO8
+    inverted: true
+    min_power: 0%
+    max_power: 100%
+
+switch:
+    # https://esphome.io/components/switch/restart.html
+  - platform: restart
+    #name: "${dev_friendly_name} Reboot ESP"
+    name: "Reboot ESP"
+    icon: mdi:restart
+    disabled_by_default: true
+    entity_category: diagnostic
+
+  - platform: template
+    id: switch1
+    optimistic: true
+    internal: true
+    turn_on_action:
+      - light.turn_on:
+          id: rgbw_led
+          color_mode: RGB_WHITE
+          brightness: 100%
+          red: 100%
+          green: 50%
+          blue: 0%
+          white: 70%
+          # effect: "Custom Flicker"
+    turn_off_action:
+      - light.turn_off:
+          id: rgbw_led
+    restore_mode: RESTORE_DEFAULT_OFF
+
+sensor:
+  - platform: adc
+    pin: GPIO3
+    name: "Battery Voltage"
+    update_interval: 60s
+    attenuation: 12db
+
+  - platform: uptime
+    name: "Uptime seconds"
+    id: uptime_sec
+    update_interval: 60s
+    internal: true
+    disabled_by_default: true
+    entity_category: diagnostic
+    
+  - platform: wifi_signal
+    name: "WiFi RSSI"
+    id: wifi_rssi
+    update_interval: 60s
+    #internal: true
+    disabled_by_default: true
+    entity_category: diagnostic
+
+interval:
+  - interval: 5s
+    then:
+      - logger.log: "Running consider_deep_sleep..."
+      - script.execute: consider_deep_sleep
+
+# 
+# Main logic, not a loop.   
+#
+# Called from successful sensor updates to HA.
+# Relies on sensor update timing to act as loop triogger for OTA mode
+#
+script:
+  - id: consider_deep_sleep
+    mode: queued
+    then:
+      - if:
+          # path 1, we dont have connection to HA yet, so just chill for a bit
+          condition:
+              - global.state:
+                  id: mqtt_done_switch
+                  state: true
+          then:
+            - logger.log: "mqtt_done_switch is true!"
+            - if:
+                condition:
+                condition:
+                        - lambda |-
+                            return id(sleep_interval).state == '60min';
+                then:
+                  # - globals.set:
+                      # id: delay_int
+                      # value: '3600000' # 60min to ms: 60 * 60 * 1000
+                  - deep_sleep.enter: 
+                      id: deep_sleep1
+                      sleep_duration: 60min
+                else:
+                  - if:
+                      condition:
+                          - text_sensor.state:
+                              id: sleep_interval
+                              state: 10min
+                      then:
+                        # - globals.set:
+                            # id: delay_int
+                            # value: '600000' # 10min to ms: 10 * 60 * 1000
+                        - deep_sleep.enter: 
+                            id: deep_sleep1
+                            sleep_duration: 10min
+                      else:
+                        - if:
+                            condition:
+                                - text_sensor.state:
+                                    id: sleep_interval
+                                    state: 2min
+                            then:
+                              # - globals.set:
+                                  # id: delay_int
+                                  # value: '120000' # 2min to ms: 2 * 60 * 1000
+                              - deep_sleep.enter: 
+                                  id: deep_sleep1
+                                  sleep_duration: 2min
+                            else:
+                              - if:
+                                  condition:
+                                      - text_sensor.state:
+                                          id: sleep_interval
+                                          state: 30s
+                                  then:
+                                    # - globals.set:
+                                        # id: delay_int
+                                        # value: '30000' # 30s to ms: 30 * 1000
+                                    - deep_sleep.enter: 
+                                        id: deep_sleep1
+                                        sleep_duration: 30s
+                                  else:
+                                    - if:
+                                        condition:
+                                            - text_sensor.state:
+                                                id: sleep_interval
+                                                state: "always on"
+                                        then:
+                                          - deep_sleep.prevent: deep_sleep1
+                                        else:
+                                          - logger.log: "Unknown value in text_sensor, mqtt_subscribe, candles/sleep_interval"
+          else:
+            - logger.log: "mqtt_done_switch is false!"
+
+# Trick # 2 - allow flag in home assistant to block sleep
+#
+# Rather than a simple binary though, I opted for a select_helper to give 3 run modes
+# - no sleep - 'ota'
+# - on the minute - '60s'
+# - on the hour - '600s'
+# just realized i missed great chance for horrible UI (ota,otm, oth, lol)
+text_sensor:
+
+  - platform: mqtt_subscribe
+    name: "Candles Sleep Interval"
+    id: sleep_interval
+    topic: "candles/sleep_interval"
+    on_value:
+
+  - platform: template
+    name: "Friendly Name"
+    icon: 'mdi:information-outline'
+    lambda: |-
+      return {"$dev_friendly_name"};
+    disabled_by_default: true
+    entity_category: diagnostic
+    
+  - platform: homeassistant
+    name: Candle Sleep Interval
+    entity_id: input_select.candle_sleep_interval
+    id: candle_sleep_interval
+
+  - platform: template
+    name: "Friendly Name"
+    icon: 'mdi:information-outline'
+    lambda: |-
+      return {"$dev_friendly_name"};
+    disabled_by_default: true
+    entity_category: diagnostic
+
+  - platform: wifi_info
+    ip_address:
+      name: "WiFi IP"
+      icon: mdi:ip-network
+      update_interval: 60s
+      disabled_by_default: true
+      entity_category: diagnostic
+      
+    ssid:
+      name: "WiFi SSID"
+      icon: mdi:wifi
+      update_interval: 60s
+      disabled_by_default: true
+      entity_category: diagnostic
+    
+    mac_address:
+      name: "WiFi MAC"
+      icon: mdi:identifier
+      disabled_by_default: true
+      entity_category: diagnostic
+    
+  - platform: version
+    name: "ESPHome Version"
+    hide_timestamp: true
+    disabled_by_default: true
+    entity_category: diagnostic
+
+#  - platform: template
+#    name: ${dev_friendly_name} Uptime
+#    id: uptime_human
+#    icon: mdi:clock-start
+
+# Get the time from Home Assistant to sync the onboard real-time-clock.  
+#time:
+#  - platform: homeassistant
+#    id: ha_time
+
+# # Example configuration entry
+# deep_sleep:
+  # run_duration: 20s
+  # sleep_duration: 10min
+deep_sleep:
+  id: deep_sleep1
+  sleep_duration: 60s #We override this on call
+
+# i2c:
+  # sda: GPIO4
+  # scl: GPIO5
+  # scan: true
+  # id: bus_a
+
+# time:
+  # - platform: ds1307
+    # id: ds1307_time
+    
+  # - platform: sntp
+    # id: sntp_time
+    # timezone: America/New_York
+    # servers:
+     # - 192.168.1.1
+     # - 0.pool.ntp.org
+     # - 1.pool.ntp.org
+    # on_time_sync:
+      # then:
+        # # ... and update the RTC when the synchronization was successful
+        # - ds1307.write_time:
+          # # - logger.log: "Wrote SNTP time to RTC"
+          # # - logger.log: it.strftime(0, 0, id(font), "%Y-%m-%d %H:%M", id(sntp_time).now());"
+        # - lambda: |-          
+            # char str[30];
+            # time_t currTime = id(sntp_time).now().timestamp;
+            # strftime(str, sizeof(str), "%Y-%m-%d %H:%M", localtime(&currTime));
+            # ESP_LOGD("custom", "Wrote SNTP time to RTC, curTime: %s", str);

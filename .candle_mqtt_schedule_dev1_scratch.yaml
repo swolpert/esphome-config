@@ -1,0 +1,102 @@
+esphome:
+  name: schedule_light_control
+  platform: ESP32
+  board: esp32dev
+
+# WiFi Configuration
+wifi:
+  ssid: "Your_SSID"
+  password: "Your_PASSWORD"
+
+# MQTT Configuration
+mqtt:
+  broker: "your_mqtt_broker"
+  username: "your_mqtt_username"
+  password: "your_mqtt_password"
+  on_message:
+    - topic: schedule/light_control
+      then:
+        - lambda: |-
+            auto json = json::parse(x.c_str());
+            if (json.contains("on_tod") && json.contains("off_tod")) {
+              std::string new_on_time = json["on_tod"].as<std::string>();
+              std::string new_off_time = json["off_tod"].as<std::string>();
+
+              if (new_on_time != id(on_time)) {
+                ESP_LOGI("main", "Updating ON time: %s -> %s", id(on_time).c_str(), new_on_time.c_str());
+                id(on_time) = new_on_time;
+                save_global("on_time", new_on_time);
+              }
+
+              if (new_off_time != id(off_time)) {
+                ESP_LOGI("main", "Updating OFF time: %s -> %s", id(off_time).c_str(), new_off_time.c_str());
+                id(off_time) = new_off_time;
+                save_global("off_time", new_off_time);
+              }
+            } else {
+              ESP_LOGW("main", "Invalid schedule format received");
+            }
+
+# Time Component
+time:
+  - platform: sntp
+    id: sntp_time
+
+# Light Component
+output:
+  - platform: gpio
+    pin: GPIO16
+    id: light_output
+
+light:
+  - platform: binary
+    output: light_output
+    name: "Scheduled Light"
+    id: rgbw_led
+
+# Globals for Storing the Schedule
+globals:
+
+
+# Automations for Schedule Execution
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          auto time = id(sntp_time).now();
+          if (time.is_valid()) {
+            char current_time[9];
+            snprintf(current_time, sizeof(current_time), "%02d:%02d:%02d", time.hour, time.minute, time.second);
+
+            if (id(on_time) != "none" && id(on_time) == current_time) {
+              ESP_LOGI("main", "Turning ON the light");
+              id(rgbw_led).turn_on();
+            } else if (id(off_time) != "none" && id(off_time) == current_time) {
+              ESP_LOGI("main", "Turning OFF the light");
+              id(rgbw_led).turn_off();
+            }
+          } else {
+            ESP_LOGW("main", "Invalid current time");
+          }
+
+# Helper Functions for Persistent Storage
+custom_component:
+  - lambda: |-
+      static void save_global(const char* key, const std::string& value) {
+        ESP_LOGI("main", "Saving %s to flash: %s", key, value.c_str());
+        ESPPreferences::write_string(key, value);
+      }
+
+      static std::string load_global(const char* key, const std::string& default_value) {
+        auto value = ESPPreferences::read_string(key, default_value);
+        ESP_LOGI("main", "Loaded %s from flash: %s", key, value.c_str());
+        return value;
+      }
+
+# Initialization on Boot
+esphome.on_boot:
+  priority: 600
+  then:
+    - lambda: |-
+        id(on_time) = load_global("on_time", "none");
+        id(off_time) = load_global("off_time", "none");

@@ -1,0 +1,93 @@
+          ESP_LOGI("ds3231", "Setting ds3231 alarm...");
+
+          // Helper function for I2C read/write operations
+          void i2c_read_or_write(
+              ds1307_time_t *ds1307_time,
+              uint8_t reg_addr,
+              uint8_t *data,
+              size_t length,
+              bool is_read
+          ) {
+              ESP_LOGD("ds3231-i2c", "I2C device 0x68 at register 0x%02X...", reg_addr);
+
+              bool success = false;
+              size_t bytes_transferred = 0;
+
+              if (is_read) {
+                  success = ds1307_time->read_bytes(reg_addr, data, length);
+                  bytes_transferred = success ? length : 0;
+              } else {
+                  success = ds1307_time->write_bytes(reg_addr, data, length);
+                  bytes_transferred = success ? length : 0;
+              }
+
+              if (success) {
+                  std::string data_str;
+                  for (size_t i = 0; i < bytes_transferred; ++i) {
+                      char byte_str[5];
+                      snprintf(byte_str, sizeof(byte_str), "0x%02X ", data[i]);
+                      data_str += byte_str;
+                  }
+                  ESP_LOGD("ds3231-i2c", "I2C %s successful: %s(length: %zu)", 
+                          is_read ? "read" : "write", data_str.c_str(), bytes_transferred);
+              } else {
+                  ESP_LOGE("i2c", "I2C %s failed at register 0x%02X for length %zu.", 
+                          is_read ? "read" : "write", reg_addr, length);
+              }
+          }
+
+          uint8_t reg_addr;
+          uint8_t data[4];
+
+          /** Read ALARM date-time **/
+          reg_addr = 0x07;
+          i2c_read_or_write(ds1307_time, reg_addr, data, 4, true);
+
+          // Helper function for BCD conversion
+          auto decimal_to_bcd = [](uint8_t val) -> uint8_t {
+            return ((val / 10) << 4) | (val % 10);
+          };
+
+          uint8_t seconds_bcd = decimal_to_bcd(alarm_time.second);
+          uint8_t minutes_bcd = decimal_to_bcd(alarm_time.minute);
+          uint8_t hours_bcd = decimal_to_bcd(alarm_time.hour);
+
+          /** Write ALARM date-time **/
+          reg_addr = 0x07;
+          data[0] = seconds_bcd & 0x7F;  // A1M1=0: Match exact second
+          data[1] = minutes_bcd & 0x7F;  // A1M2=0: Match exact minute
+          data[2] = hours_bcd & 0x7F;    // A1M3=0: Match exact hour
+          data[3] = 0x80;                // A1M4=1: Match any day
+          i2c_read_or_write(ds1307_time, reg_addr, data, 4, false);
+
+
+
+          ESP_LOGI("ds3231", "Alarm time: %02d:%02d:%02d", alarm_time.hour, alarm_time.minute, alarm_time.second);
+
+          #define NEOSC 0x80 // Bit 7: Enable Oscillator (nEOSC)
+          #define BBSQW 0x40 // Bit 6: Battery-Backed Square-Wave Enable (BBSQW)
+          #define CONV  0x20 // Bit 5: Convert Temperature (CONV)
+          #define RS2   0x10 // Bit 4: Rate Select (RS2)
+          #define RS1   0x08 // Bit 3: Rate Select (RS1)
+          #define INTCN 0x04 // Bit 2: Interrupt Control (INTCN)
+          #define A2IE  0x02 // Bit 1: Alarm 2 Interrupt Enable (A2IE)
+          #define A1IE  0x01 // Bit 0: Alarm 1 Interrupt Enable (A1IE)
+
+          /** ENABLE ALARM **/
+          reg_addr = 0x0E;
+          data[0] = A1IE; // INTCN | A1IE to enable alarm, or only A1IE to enable square wave on alarm
+          i2c_read_or_write(ds1307_time, reg_addr, data, 1, false);
+
+          uint8_t reg_addr;
+          uint8_t data[4];
+          reg_addr = 0x07;
+          ESP_LOGD("ds3231", "I2C device 0x68 at register 0x%02X...", reg_addr);
+          // Read 4 bytes from the device
+          if (ds1307_time->read_bytes(reg_addr, data, 4)) {
+            ESP_LOGD("ds3231", "I2C read successful: 0x%02X 0x%02X 0x%02X 0x%02X", data[0], data[1], data[2], data[3]);
+          } else {
+            ESP_LOGE("ds3231", "I2C read failed.");
+          }
+
+          ESP_LOGI("ds3231", "Alarm set for %02d:%02d:%02d.",
+                  alarm_time.hour, alarm_time.minute, alarm_time.second);

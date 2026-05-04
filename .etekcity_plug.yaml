@@ -1,0 +1,258 @@
+esphome:
+  name: ${dev_name}
+  friendly_name: ${dev_friendly_name}
+# # To remove ota password...
+# # Must put password in .base.yaml ota: section
+  # on_boot:
+    # - lambda: |-
+        # id(ota_id).set_auth_password("");
+
+esp8266:
+  board: esp01_1m
+#  board: esp12e # DO NOT USE? Chip is 4M, but our Etekcity partition is 1MB
+#  arduino_version: 2.5.1
+
+#logger:
+#  baud_rate: 0 # turn off serial logging so we don't interfere with the green LED
+
+# Enable Home Assistant API
+api:
+  # password: !secret api_password
+  # encryption:
+    # key: !secret api_key
+    
+# mqtt:
+  # broker: 192.168.1.200
+  # username: !secret mqtt_user
+  # password: !secret mqtt_password
+  # discovery: true
+  # log_topic: "${dev_name}/debug"
+
+binary_sensor:
+  - platform: status
+    #name: "${dev_friendly_name} Connectivity"
+    name: "Connectivity"
+    disabled_by_default: true
+    entity_category: diagnostic
+
+  - platform: gpio
+    id: button_id
+    pin:
+      number: GPIO14
+      mode: INPUT_PULLUP
+      inverted: true
+    on_press:
+      then:
+        - switch.toggle: switch1
+
+output:
+#  - platform: gpio
+#    id: amber_led
+#    pin: GPIO16
+    
+  - platform: esp8266_pwm
+    id: blue_led_pwm
+    pin: GPIO5
+    min_power: 0%
+    max_power: 5%
+
+light:
+  - platform: status_led
+    id: blue_status_led
+    output: blue_led_pwm
+
+switch:
+  - platform: gpio
+    #name: "${dev_friendly_name} Switch"
+    name: "Power"
+    icon: ${dev_icon}
+    pin: GPIO4
+    id: switch1
+#    on_turn_on:
+#      output.turn_on: amber_led
+#    on_turn_off:
+#      output.turn_off: amber_led
+    restore_mode: RESTORE_DEFAULT_OFF
+    
+    # https://esphome.io/components/switch/restart.html
+  - platform: restart
+    #name: "${dev_friendly_name} Reboot ESP"
+    name: "Reboot ESP"
+    icon: mdi:restart
+    disabled_by_default: true
+    entity_category: diagnostic
+    
+    # DEBUG LED
+  - platform: gpio
+    pin:
+      number: GPIO2
+      inverted: true
+    restore_mode: ALWAYS_OFF
+    id: led_internal
+    name: "Internal Blue LED (debug)"
+    disabled_by_default: true
+    entity_category: diagnostic
+
+#  - platform: monochromatic
+#    name: "amber LED"
+#    id: amber_led_light
+#    output: amber_led_pwm
+#    #default_transition_length: 1s
+    
+#status_led:
+#  pin:
+#    number: GPIO5 #blue LED
+
+sensor:
+  - platform: uptime
+    name: "Uptime seconds"
+    id: uptime_sec
+    update_interval: 15s
+    internal: true
+    disabled_by_default: true
+    entity_category: diagnostic
+
+  - platform: wifi_signal
+    name: "WiFi RSSI"
+    id: wifi_rssi
+    update_interval: 60s
+    #internal: true
+    disabled_by_default: true
+    entity_category: diagnostic
+
+  - platform: pulse_counter
+    pin: GPIO12
+    id: gpio12
+    name: "GPIO12 counter"
+    count_mode:
+      rising_edge: DISABLE
+      falling_edge: INCREMENT
+    internal_filter: 1ms
+    update_interval: 20s
+    filters:
+      - sliding_window_moving_average:
+          window_size: 3
+          send_every: 3
+          send_first_at: 3
+    on_value:
+      - sensor.template.publish:
+          id: voltage
+          state: !lambda 'return id(gpio12).state / 170.4;'
+
+  - platform: pulse_counter
+    pin: GPIO13
+    id: gpio13
+    name: "GPIO13 counter"
+    count_mode:
+      rising_edge: DISABLE
+      falling_edge: INCREMENT
+    internal_filter: 2ms
+    update_interval: 20s
+    on_value:
+      - sensor.template.publish:
+          id: watts
+          state: !lambda  |-
+            if (id(switch1).state) {
+              return id(gpio13).state * 0.07708;
+            } else {
+              return 0;
+            }
+      - sensor.template.publish:
+          id: amps
+          state: !lambda 'return id(watts).state / id(voltage).state;'
+
+  - platform: template 
+    id: voltage
+    name: "Voltage"
+    unit_of_measurement: "V"
+  - platform: template 
+    id: watts
+    name: "Watts"
+    unit_of_measurement: "W"
+  - platform: template 
+    id: amps
+    unit_of_measurement: "A"
+    name: "Amps"
+    accuracy_decimals: 3
+
+text_sensor:
+  - platform: template
+    name: "Friendly Name"
+    icon: 'mdi:information-outline'
+    lambda: |-
+      return {"$dev_friendly_name"};
+    disabled_by_default: true
+    entity_category: diagnostic
+
+# #  Creates a sensor of the uptime of the device, in formatted days, hours, minutes and seconds
+  # - platform: template
+    # name: "Uptime"
+    # lambda: |-
+      # int seconds = (id(uptime_sec).state);
+      # int days = seconds / (24 * 3600);
+      # seconds = seconds % (24 * 3600);
+      # int hours = seconds / 3600;
+      # seconds = seconds % 3600;
+      # int minutes = seconds /  60;
+      # seconds = seconds % 60;
+      # if ( days > 3650 ) {
+        # return { "Starting up" };
+      # } else if ( days ) {
+        # return { (String(days) +"d " + String(hours) +"h " + String(minutes) +"m "+ String(seconds) +"s").c_str() };
+      # } else if ( hours ) {
+        # return { (String(hours) +"h " + String(minutes) +"m "+ String(seconds) +"s").c_str() };
+      # } else if ( minutes ) {
+        # return { (String(minutes) +"m "+ String(seconds) +"s").c_str() };
+      # } else {
+        # return { (String(seconds) +"s").c_str() };
+      # }
+    # icon: mdi:clock-start
+    # update_interval: 10s
+    # disabled_by_default: true
+    # entity_category: diagnostic
+
+  - platform: wifi_info
+    ip_address:
+      name: "WiFi IP"
+      icon: mdi:ip-network
+      #update_interval: 60s
+      disabled_by_default: true
+      entity_category: diagnostic
+      
+    ssid:
+      name: "WiFi SSID"
+      icon: mdi:wifi
+      #update_interval: 60s
+      disabled_by_default: true
+      entity_category: diagnostic
+      
+    mac_address:
+      name: "WiFi MAC"
+      icon: mdi:identifier
+      disabled_by_default: true
+      entity_category: diagnostic
+
+#  - platform: template
+#    name: "WiFi RSSI"
+#    icon: mdi:signal
+#    lambda: |-
+#      int rssi = id(wifi_rssi).state;
+#      if ( rssi > 150 || rssi < -150 ) {
+#        return { "NaN dBm" };
+#      } else {
+#        return { (String(rssi) +" dBm").c_str()};
+#      }
+#    update_interval: 60s
+#    disabled_by_default: true
+#    entity_category: diagnostic
+    
+  - platform: version
+    name: "ESPHome Version"
+    hide_timestamp: true
+    disabled_by_default: true
+    entity_category: diagnostic
+
+#  - platform: template
+#    name: ${dev_friendly_name} Uptime
+#    id: uptime_human
+#    icon: mdi:clock-start

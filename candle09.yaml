@@ -1,0 +1,9 @@
+substitutions:
+  # https://esphome.io/guides/configuration-types.html#substitutions
+  dev_name: candle09                  # hostname & entity_id
+  dev_friendly_name: Candle 09     # Displayed in HA frontend
+  dev_use_address: "${dev_name}.local"
+  # dev_icon: mdi:candle
+
+<<: !include .base.yaml
+<<: !include .esp32_candlestick.yaml

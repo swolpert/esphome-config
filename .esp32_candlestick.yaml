@@ -1,0 +1,236 @@
+---
+# we can rely on HA time since we only use it after sensor succesfully publishes (successfully talked to HA)
+time:
+  - platform: homeassistant
+    id: homeassistant_time
+
+esphome:
+  name: ${dev_name}
+  friendly_name: ${dev_friendly_name}
+# # To remove ota password...
+# # Must put password in .base.yaml ota: section
+  # on_boot:
+    # - lambda: |-
+        # id(ota_id).set_auth_password("");
+
+esp32:
+  board: dfrobot_beetle_esp32c3
+  variant: esp32c3
+  framework:
+    type: arduino
+
+binary_sensor:
+
+  - platform: status
+    #name: "${dev_friendly_name} Connectivity"
+    name: "Connectivity"
+    disabled_by_default: true
+    entity_category: diagnostic
+
+  - platform: gpio
+    id: button_id
+    # name: BOOT0 Button
+    internal: true
+    filters:
+      - delayed_on: 10ms
+    pin:
+      number: GPIO9
+      inverted: true
+      mode:
+        input: true
+        pullup: false
+    on_press:
+      then:
+        - logger.log: "Button BOOT0 pressed"
+        - switch.toggle: switch1
+
+# interval:
+#   - interval: 10s
+#     then:
+#       - light.toggle: blue_led_pulse
+
+light:
+# # for PWM status led:
+#   - platform: status_led
+#     id: blue_status_led
+#     output: blue_led_pwm
+  - platform: monochromatic
+    output: blue_led_pwm
+    id: blue_led_light
+    name: "Blue LED"
+    restore_mode: ALWAYS_OFF
+    effects:
+      - pulse:
+      - pulse:
+          name: "Custom Pulse"
+          transition_length: 1.5s
+          update_interval: 1.5s
+          min_brightness: 10%
+          max_brightness: 85%
+
+      # - pulse:
+      #     name: "Slow Pulse"
+      #     transition_length: 500ms
+      #     update_interval: 2s
+      # - pulse:
+      #     name: "Asymmetrical Pulse"
+      #     transition_length:
+      #       on_length: 1s
+      #       off_length: 500ms
+      #     update_interval: 1.5s
+    on_turn_on:
+      then:
+        - light.turn_on:
+            id: blue_led_light
+            effect: "Custom Pulse"
+
+  - platform: neopixelbus
+    id: rgbw_led
+    name: "Candle"
+    icon: mdi:candle
+    type: GRBW
+    variant: SK6812
+    pin: GPIO21
+    num_leds: 1
+    restore_mode: RESTORE_DEFAULT_OFF
+    # color_correct: [100%, 100%, 100%, 100%]
+    # color_correct: [1%, 0%, 0%, 10%]
+    effects:
+      - flicker:
+      - flicker:
+          name: "Custom Flicker"
+          alpha: 95%
+          intensity: 5%
+          # update_interval: 250ms
+
+# for PWM status led:
+output:
+  - platform: ledc
+    id: blue_led_pwm
+    pin: GPIO8
+    inverted: true
+    min_power: 0%
+    max_power: 100%
+
+switch:
+    # https://esphome.io/components/switch/restart.html
+  - platform: restart
+    #name: "${dev_friendly_name} Reboot ESP"
+    name: "Reboot ESP"
+    icon: mdi:restart
+    disabled_by_default: true
+    entity_category: diagnostic
+
+  - platform: template
+    id: switch1
+    optimistic: true
+    internal: true
+    turn_on_action:
+      - light.turn_on:
+          id: rgbw_led
+          color_mode: RGB_WHITE
+          brightness: 100%
+          red: 100%
+          green: 50%
+          blue: 0%
+          white: 70%
+          # effect: "Custom Flicker"
+    turn_off_action:
+      - light.turn_off:
+          id: rgbw_led
+    restore_mode: RESTORE_DEFAULT_OFF
+        
+sensor:
+  - platform: adc
+    pin: GPIO3
+    name: "Battery Voltage"
+    update_interval: 60s
+    attenuation: 12db
+
+  - platform: uptime
+    name: "Uptime seconds"
+    id: uptime_sec
+    update_interval: 60s
+    internal: true
+    disabled_by_default: true
+    entity_category: diagnostic
+    
+  - platform: wifi_signal
+    name: "WiFi RSSI"
+    id: wifi_rssi
+    update_interval: 60s
+    #internal: true
+    disabled_by_default: true
+    entity_category: diagnostic
+
+# Trick # 2 - allow flag in home assistant to block sleep
+#
+# Rather than a simple binary though, I opted for a select_helper to give 3 run modes
+# - no sleep - 'ota'
+# - on the minute - '60s'
+# - on the hour - '600s'
+# just realized i missed great chance for horrible UI (ota,otm, oth, lol)
+text_sensor:
+  - platform: template
+    name: "Friendly Name"
+    icon: 'mdi:information-outline'
+    lambda: |-
+      return {"$dev_friendly_name"};
+    disabled_by_default: true
+    entity_category: diagnostic
+
+  - platform: wifi_info
+    ip_address:
+      name: "WiFi IP"
+      icon: mdi:ip-network
+      update_interval: 60s
+      disabled_by_default: true
+      entity_category: diagnostic
+      
+    ssid:
+      name: "WiFi SSID"
+      icon: mdi:wifi
+      update_interval: 60s
+      disabled_by_default: true
+      entity_category: diagnostic
+      
+    mac_address:
+      name: "WiFi MAC"
+      icon: mdi:identifier
+      disabled_by_default: true
+      entity_category: diagnostic
+    
+  - platform: version
+    name: "ESPHome Version"
+    hide_timestamp: true
+    disabled_by_default: true
+    entity_category: diagnostic
+
+# i2c:
+  # sda: GPIO4
+  # scl: GPIO5
+  # scan: true
+  # id: bus_a
+
+# time:
+  # - platform: ds1307
+    # id: ds1307_time
+    
+  # - platform: sntp
+    # id: sntp_time
+    # timezone: America/New_York
+    # servers:
+     # - 192.168.1.1
+     # - 0.pool.ntp.org
+     # - 1.pool.ntp.org
+    # on_time_sync:
+      # then:
+        # # ... and update the RTC when the synchronization was successful
+        # - ds1307.write_time:
+          # # - logger.log: "Wrote SNTP time to RTC"
+          # # - logger.log: it.strftime(0, 0, id(font), "%Y-%m-%d %H:%M", id(sntp_time).now());"
+        # - lambda: |-          
+            # char str[30];
+            # time_t currTime = id(sntp_time).now().timestamp;
+            # strftime(str, sizeof(str), "%Y-%m-%d %H:%M", localtime(&currTime));
+            # ESP_LOGD("custom", "Wrote SNTP time to RTC, curTime: %s", str);

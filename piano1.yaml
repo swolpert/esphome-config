@@ -1,0 +1,10 @@
+substitutions:
+  # https://esphome.io/guides/configuration-types.html#substitutions
+  dev_name: piano1                  # hostname & entity_id
+  dev_friendly_name: Piano Plug     # Displayed in HA frontend
+  dev_use_address: "${dev_name}.local"
+  #dev_use_address: "etekcity-piano1.local"
+  dev_icon: mdi:power-plug
+
+<<: !include .base.yaml
+<<: !include .etekcity_plug.yaml

@@ -1,0 +1,96 @@
+substitutions:
+  # https://esphome.io/guides/configuration-types.html#substitutions
+  dev_name: "den-fanlight"                  # hostname & entity_id
+  dev_friendly_name: "Den Fan"     # Displayed in HA frontend
+  dev_use_address: "${dev_name}.local"
+
+esphome:
+  name: $dev_name
+  friendly_name: ${dev_friendly_name}
+#  build_path: "../config/esphome/${name}_build"
+  on_boot:
+    priority: -100
+    then:
+      - delay: 10s
+      - lambda: |-
+          ESP_LOGI("boot", "on_boot triggered");
+      - delay: 1s
+      - number.set:
+          id: light_min_brightness
+          value: 10
+      - lambda: |-
+          ESP_LOGI("boot", "on_boot finished");
+
+esp8266:
+  board: esp01_1m
+
+# Disable logging via the UART
+logger:
+  baud_rate: 0
+  level: DEBUG
+  
+uart:
+  rx_pin: GPIO3
+  tx_pin: GPIO1
+  baud_rate: 115200
+
+# [tuya:041]: Tuya:
+# [tuya:056]:   Datapoint 9: switch (value: OFF)      # light switch
+# [tuya:058]:   Datapoint 10: int value (value: 1000) # light dimmer
+# [tuya:056]:   Datapoint 1: switch (value: OFF)      # fan switch
+# [tuya:062]:   Datapoint 3: enum (value: 0)          # fan speed
+# [tuya:058]:   Datapoint 105: int value (value: 100) # light min brightness
+# [tuya:062]:   Datapoint 106: enum (value: 0)        # unknown
+# [tuya:058]:   Datapoint 101: int value (value: 0)   # unknown
+# [tuya:058]:   Datapoint 103: int value (value: 0)   # unknown
+# [tuya:074]:   Product: '{"p":"lm9ga77f6t94fmck","v":"3.3.17","m":0}'
+
+tuya:
+  id: tuya_mcu
+
+light:
+  - platform: tuya
+    id: fan_light
+    name: "Light"
+    dimmer_datapoint: 10
+    switch_datapoint: 9
+    min_value: 10
+    max_value: 1000
+
+number:
+  - platform: tuya
+    id: light_min_brightness
+    name: "Light Min Brightness"
+    number_datapoint: 105
+    step: 1
+    min_value: 10
+    max_value: 1000
+    internal: true
+
+fan:
+  - platform: tuya
+    id: ceiling_fan
+    name: "Fan"
+    switch_datapoint: 1
+    speed_datapoint: 3
+    speed_count: 4
+    
+switch:
+  # https://esphome.io/components/switch/restart.html
+  - platform: restart
+    #name: "${dev_friendly_name} Reboot ESP"
+    name: "Reboot"
+    icon: mdi:restart
+    disabled_by_default: true
+    entity_category: diagnostic
+
+sensor:
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 60s
+
+  - platform: uptime
+    name: Uptime
+    update_interval: 60s
+
+<<: !include .base-tuya.yaml

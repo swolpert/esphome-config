@@ -1,0 +1,487 @@
+---
+
+#
+#  Trick #1 - dynamic sleep duration
+#  
+#  Since startup, wifi, sensor, and HA sync take anywhere from 2 seconds to 12.
+#  So to achieve a 60s or 600s loop we dynamically adjust how long to sleep
+#
+globals:
+  - id: delay_int
+    type: int
+    restore_value: no
+    initial_value: '60'
+    
+# we can rely on HA time since we only use it after sensor succesfully publishes (successfully talked to HA)
+time:
+  - platform: homeassistant
+    id: homeassistant_time
+
+esphome:
+  name: ${dev_name}
+  friendly_name: ${dev_friendly_name}
+# # To remove ota password...
+# # Must put password in .base.yaml ota: section
+  # on_boot:
+    # - lambda: |-
+        # id(ota_id).set_auth_password("");
+
+esp32:
+  board: dfrobot_beetle_esp32c3
+  variant: esp32c3
+  framework:
+    type: arduino
+
+binary_sensor:
+  # - platform: homeassistant
+    # id: candles_on_off
+    # name: Candles OnOff
+    # entity_id: input_boolean.candles_on_off
+    # on_state:
+      # - lambda: |-
+          # // Within lambda, get the binary sensor state and conditionally do something
+          # if (id(candles_on_off).state) {
+            # // Binary sensor is ON, do something here
+            # id(switch1).turn_on();
+          # } else {
+            # // Binary sensor is OFF, do something else here
+            # id(switch1).turn_off();
+          # }
+
+  - platform: status
+    #name: "${dev_friendly_name} Connectivity"
+    name: "Connectivity"
+    disabled_by_default: true
+    entity_category: diagnostic
+
+  - platform: gpio
+    id: button_id
+    # name: BOOT0 Button
+    internal: true
+    filters:
+      - delayed_on: 10ms
+    pin:
+      number: GPIO9
+      inverted: true
+      mode:
+        input: true
+        pullup: false
+    on_press:
+      then:
+        - logger.log: "Button BOOT0 pressed"
+        - switch.toggle: switch1
+
+# interval:
+#   - interval: 10s
+#     then:
+#       - light.toggle: blue_led_pulse
+
+light:
+# # for PWM status led:
+#   - platform: status_led
+#     id: blue_status_led
+#     output: blue_led_pwm
+  - platform: monochromatic
+    output: blue_led_pwm
+    id: blue_led_light
+    name: "Blue LED"
+    restore_mode: ALWAYS_ON
+    effects:
+      - pulse:
+      - pulse:
+          name: "Custom Pulse"
+          transition_length: 1.5s
+          update_interval: 1.5s
+          min_brightness: 10%
+          max_brightness: 85%
+
+      # - pulse:
+      #     name: "Slow Pulse"
+      #     transition_length: 500ms
+      #     update_interval: 2s
+      # - pulse:
+      #     name: "Asymmetrical Pulse"
+      #     transition_length:
+      #       on_length: 1s
+      #       off_length: 500ms
+      #     update_interval: 1.5s
+    on_turn_on:
+      then:
+        - light.turn_on:
+            id: blue_led_light
+            effect: "Custom Pulse"
+
+  # - platform: esp32_rmt_led_strip
+    # id: rgbw_led2
+    # name: "Candle2"
+    # icon: mdi:candle
+    # chipset: sk6812
+    # pin: GPIO20 # GPIO21
+    # rgb_order: GRB
+    # is_rgbw: true
+    # rmt_channel: 0
+    # num_leds: 1
+    # restore_mode: RESTORE_DEFAULT_OFF
+    # effects:
+      # - flicker:
+      # - flicker:
+          # name: "Custom Flicker"
+          # alpha: 95%
+          # intensity: 5%
+
+  - platform: neopixelbus
+    id: rgbw_led
+    name: "Candle"
+    icon: mdi:candle
+    type: GRBW
+    variant: SK6812
+    pin: GPIO21
+    num_leds: 1
+    restore_mode: ALWAYS_OFF
+    # color_correct: [100%, 100%, 100%, 100%]
+    # color_correct: [1%, 0%, 0%, 10%]
+    effects:
+      - flicker:
+      - flicker:
+          name: "Custom Flicker"
+          alpha: 95%
+          intensity: 5%
+          # update_interval: 250ms
+
+# for PWM status led:
+output:
+  - platform: ledc
+    id: blue_led_pwm
+    pin: GPIO8
+    inverted: true
+    min_power: 0%
+    max_power: 100%
+
+switch:
+    # https://esphome.io/components/switch/restart.html
+  - platform: restart
+    #name: "${dev_friendly_name} Reboot ESP"
+    name: "Reboot ESP"
+    icon: mdi:restart
+    disabled_by_default: true
+    entity_category: diagnostic
+
+  - platform: template
+    id: switch1
+    optimistic: true
+    internal: true
+    turn_on_action:
+      - light.turn_on:
+          id: rgbw_led
+          color_mode: RGB_WHITE
+          brightness: 100%
+          red: 100%
+          green: 50%
+          blue: 0%
+          white: 70%
+          # effect: "Custom Flicker"
+    turn_off_action:
+      - light.turn_off:
+          id: rgbw_led
+    restore_mode: RESTORE_DEFAULT_OFF
+
+  # - platform: gpio
+  #   #name: "${dev_friendly_name} Switch"
+  #   name: "Blue LED"
+  #   pin:
+  #     number: GPIO8
+  #     inverted: true
+  #   id: switch1
+  #   icon: mdi:led-on
+  #   restore_mode: RESTORE_DEFAULT_OFF
+    
+  # - platform: template
+  #   id: switch1
+  #   #name: "${dev_friendly_name} Switch"
+  #   name: "Blue LED"
+  #   icon: ${dev_icon}
+  #   turn_on_action:
+  #     - light.turn_on: blue_status_led
+  #   turn_off_action:
+  #     - light.turn_off: blue_status_led
+  #   restore_mode: RESTORE_DEFAULT_OFF
+        
+sensor:
+  - platform: adc
+    pin: GPIO3
+    name: "Battery Voltage"
+    update_interval: 60s
+    attenuation: 12db
+
+  - platform: uptime
+    name: "Uptime seconds"
+    id: uptime_sec
+    update_interval: 5s
+    internal: true
+    disabled_by_default: true
+    entity_category: diagnostic
+    
+  - platform: wifi_signal
+    name: "WiFi RSSI"
+    id: wifi_rssi
+    update_interval: 60s
+    #internal: true
+    disabled_by_default: true
+    entity_category: diagnostic
+
+# interval:
+  # - interval: 1s
+    # then:
+      # - script.execute: consider_deep_sleep
+
+# 
+# Main logic, not a loop.   
+#
+# Called from successful sensor updates to HA.
+# Relies on sensor update timing to act as loop triogger for OTA mode
+#
+script:
+  # - id: check_candles_on_off
+    # mode: queued
+    # then:
+      # if:
+        # condition:
+          # binary_sensor.is_on: candles_on_off
+        # then:
+          # - logger.log: 'candles_on_off: TURN ON candle'
+          # - switch.turn_on: switch1
+        # else:
+          # - logger.log: 'candles_on_off: TURN OFF candle'
+          # - switch.turn_off: switch1
+  - id: consider_deep_sleep
+    mode: queued
+    then:
+      - if:
+          # path 1, we dont have connection to HA yet, so just chill for a bit
+          condition:
+            lambda:  return id(candle_sleep_interval).state.empty();
+          then:
+            - logger.log: 'Unknown Setting, do nothing..' #will try again after next sensor read in ~5 seconds
+          else:
+            # - script.execute: check_candles_on_off
+            - if:
+                # path 2 - we have value from HA, and it's OTA mode - no sleep! (also do nothing but diff log)
+                condition: 
+                  lambda: return strcmp("always on" , id(candle_sleep_interval).state.c_str() ) == 0;
+                then:
+                  - logger.log: 'Home Assistant Helper set to OTA, do not sleep.'
+                else:          
+                  - if:
+                      # path 3a - okay to loop, set delay to 2min
+                      condition: 
+                        lambda: return  strcmp( id(candle_sleep_interval).state.c_str(), "2min") == 0;
+                      then:
+                        - lambda: |
+                                                        id(delay_int) = 120;
+                        - logger.log: 'Delay set to 2 min (120)'
+                      else:                  
+                        - if:
+                            # path 3b - okauy to loop, set interval to 10min
+                            condition: 
+                              lambda: return  strcmp( id(candle_sleep_interval).state.c_str(), "10min") == 0;
+                            then:
+                            - lambda: |
+                                                                id(delay_int) = 600;
+                            - logger.log: 'Delay set to 10 min (600)'
+                            else:                  
+                              - if:
+                                  # path 3c - okauy to loop, set interval to 60min
+                                  condition: 
+                                    lambda: return  strcmp( id(candle_sleep_interval).state.c_str(), "60min") == 0;
+                                  then:
+                                  - lambda: |
+                                                                      id(delay_int) = 3600;
+                                  - logger.log: 'Delay set to 60 min (3600)'
+                    # path 3 (a&b) - compensate for wifi/HA delays by reducing interval to next even minute/10minute
+                  - lambda: |
+                      auto now = id(homeassistant_time).now().timestamp;
+                      auto timefuture = now + id(delay_int);
+                      timefuture -= (timefuture % 60);
+                      ESP_LOGI("UGH", "Next target runtime: %d", timefuture);
+                      id(delay_int) = timefuture - now ;                      
+                  - logger.log: 'Entering sleep'
+                  - deep_sleep.enter: 
+                      id: deep_sleep1
+                      sleep_duration: !lambda return id(delay_int) * 1000;   #lambdas should return value as ms
+
+  # - platform: mqtt_subscribe
+    # id: prevent_sleep
+    # topic: homeassistant/prevent_sleep
+
+mqtt:
+  broker: 192.168.1.200
+  username: !secret mqtt_user
+  password: !secret mqtt_password
+  discovery: false
+  birth_message:
+    topic: ${dev_name}/status/availability
+    payload: online
+  will_message:
+    topic: ${dev_name}/status/availability
+    payload: offline
+  on_message:
+  - topic: candles/ota_prevent_sleep
+    payload: 'ON'
+    then:
+      - deep_sleep.prevent: deep_sleep1
+  - topic: candles/ota_prevent_sleep
+    payload: 'OFF'
+    then:
+      - deep_sleep.prevent: deep_sleep1
+  - topic: candles/switch
+    payload: 'ON'
+    then:
+      - switch.turn_on: switch1
+  - topic: candles/switch
+    payload: 'OFF'
+    then:
+      - switch.turn_off: switch1
+
+# Trick # 2 - allow flag in home assistant to block sleep
+#
+# Rather than a simple binary though, I opted for a select_helper to give 3 run modes
+# - no sleep - 'ota'
+# - on the minute - '60s'
+# - on the hour - '600s'
+# just realized i missed great chance for horrible UI (ota,otm, oth, lol)
+text_sensor:
+  - platform: template
+    name: "Friendly Name"
+    icon: 'mdi:information-outline'
+    lambda: |-
+      return {"$dev_friendly_name"};
+    disabled_by_default: true
+    entity_category: diagnostic
+    
+  - platform: homeassistant
+    name: Candle Sleep Interval
+    entity_id: input_select.candle_sleep_interval
+    id: candle_sleep_interval
+
+# #  Creates a sensor of the uptime of the device, in formatted days, hours, minutes and seconds
+#   - platform: template
+#     name: "Uptime"
+#     lambda: |-
+#       int seconds = (id(uptime_sec).state);
+#       int days = seconds / (24 * 3600);
+#       seconds = seconds % (24 * 3600);
+#       int hours = seconds / 3600;
+#       seconds = seconds % 3600;
+#       int minutes = seconds /  60;
+#       seconds = seconds % 60;
+#       if ( days > 3650 ) {
+#         return { "Starting up" };
+#       } else if ( days ) {
+#         return { (String(days) +"d " + String(hours) +"h " + String(minutes) +"m "+ String(seconds) +"s").c_str() };
+#       } else if ( hours ) {
+#         return { (String(hours) +"h " + String(minutes) +"m "+ String(seconds) +"s").c_str() };
+#       } else if ( minutes ) {
+#         return { (String(minutes) +"m "+ String(seconds) +"s").c_str() };
+#       } else {
+#         return { (String(seconds) +"s").c_str() };
+#       }
+#     icon: mdi:clock-start
+#     update_interval: 10s
+#     disabled_by_default: true
+#     entity_category: diagnostic
+
+  - platform: template
+    name: "Friendly Name"
+    icon: 'mdi:information-outline'
+    lambda: |-
+      return {"$dev_friendly_name"};
+    disabled_by_default: true
+    entity_category: diagnostic
+
+  - platform: wifi_info
+    ip_address:
+      name: "WiFi IP"
+      icon: mdi:ip-network
+      update_interval: 60s
+      disabled_by_default: true
+      entity_category: diagnostic
+      
+    ssid:
+      name: "WiFi SSID"
+      icon: mdi:wifi
+      update_interval: 60s
+      disabled_by_default: true
+      entity_category: diagnostic
+      
+    mac_address:
+      name: "WiFi MAC"
+      icon: mdi:identifier
+      disabled_by_default: true
+      entity_category: diagnostic
+
+#  - platform: template
+#    name: "WiFi RSSI"
+#    icon: mdi:signal
+#    lambda: |-
+#      int rssi = id(wifi_rssi).state;
+#      if ( rssi > 150 || rssi < -150 ) {
+#        return { "NaN dBm" };
+#      } else {
+#        return { (String(rssi) +" dBm").c_str()};
+#      }
+#    update_interval: 60s
+#    disabled_by_default: true
+#    entity_category: diagnostic
+    
+  - platform: version
+    name: "ESPHome Version"
+    hide_timestamp: true
+    disabled_by_default: true
+    entity_category: diagnostic
+
+#  - platform: template
+#    name: ${dev_friendly_name} Uptime
+#    id: uptime_human
+#    icon: mdi:clock-start
+
+# Get the time from Home Assistant to sync the onboard real-time-clock.  
+#time:
+#  - platform: homeassistant
+#    id: ha_time
+
+# # Example configuration entry
+# deep_sleep:
+  # run_duration: 20s
+  # sleep_duration: 10min
+deep_sleep:
+  id: deep_sleep1
+  sleep_duration: 30s #We override this on call
+
+# i2c:
+  # sda: GPIO4
+  # scl: GPIO5
+  # scan: true
+  # id: bus_a
+
+# time:
+  # - platform: ds1307
+    # id: ds1307_time
+    
+  # - platform: sntp
+    # id: sntp_time
+    # timezone: America/New_York
+    # servers:
+     # - 192.168.1.1
+     # - 0.pool.ntp.org
+     # - 1.pool.ntp.org
+    # on_time_sync:
+      # then:
+        # # ... and update the RTC when the synchronization was successful
+        # - ds1307.write_time:
+          # # - logger.log: "Wrote SNTP time to RTC"
+          # # - logger.log: it.strftime(0, 0, id(font), "%Y-%m-%d %H:%M", id(sntp_time).now());"
+        # - lambda: |-          
+            # char str[30];
+            # time_t currTime = id(sntp_time).now().timestamp;
+            # strftime(str, sizeof(str), "%Y-%m-%d %H:%M", localtime(&currTime));
+            # ESP_LOGD("custom", "Wrote SNTP time to RTC, curTime: %s", str);

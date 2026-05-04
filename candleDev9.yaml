@@ -1,0 +1,565 @@
+---
+
+globals:
+  # - id: delay_int
+    # type: int
+    # restore_value: no
+    # initial_value: '99999'
+
+
+
+  - id: done01_mqtt_schedule
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: done02_sntp
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: done03_adc
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: done04_mqtt_sleep_interval
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: latest_light_state
+    type: std::string
+    restore_value: no
+    initial_value: '"none"'
+    
+  - id: sleep_interval
+    type: std::string
+    restore_value: no
+    initial_value: '"none"'
+
+  - id: on_time
+    type: std::string
+    restore_value: yes
+    initial_value: "\"none\""
+
+  - id: off_time
+    type: std::string
+    restore_value: yes
+    initial_value: "\"none\""
+
+esphome:
+  name: ${dev_name}
+  friendly_name: ${dev_friendly_name}
+  
+  on_boot:
+    - priority: 700
+      then: 
+        - output.turn_on: debug_gpio
+        - logger.log: "debug_gpio turned ON"
+        # - deep_sleep.prevent: deep_sleep1
+
+    - priority: 599 # after setup_priority::DATA = 600.0f
+      then:
+        - lambda: |-
+            uint8_t reg_addr = 0x0E;
+            uint8_t data = 0xFF;
+
+            // ESP_LOGD("ds3231", "I2C device 0x68 at register 0x%02X...", reg_addr);
+
+            // // Read 1 byte from the device
+            // if (ds1307_time->read_bytes(reg_addr, &data, 1)) {
+            //   ESP_LOGD("ds3231", "I2C read successful: 0x%02X", data);
+            // } else {
+            //   ESP_LOGE("ds3231", "I2C read failed.");
+            // }
+
+            #define NEOSC 0x80 // Bit 7: Enable Oscillator (nEOSC)
+            #define BBSQW 0x40 // Bit 6: Battery-Backed Square-Wave Enable (BBSQW)
+            #define CONV  0x20 // Bit 5: Convert Temperature (CONV)
+            #define RS2   0x10 // Bit 4: Rate Select (RS2)
+            #define RS1   0x08 // Bit 3: Rate Select (RS1)
+            #define INTCN 0x04 // Bit 2: Interrupt Control (INTCN)
+            #define A2IE  0x02 // Bit 1: Alarm 2 Interrupt Enable (A2IE)
+            #define A1IE  0x01 // Bit 0: Alarm 1 Interrupt Enable (A1IE)
+
+            ESP_LOGD("ds3231", "Writing to I2C device 0x68 at register 0x%02X...", reg_addr);
+            data = INTCN; // INTCN | A1IE to enable alarm, or only A1IE to enable square wave on alarm
+            // Read 1 byte from the device
+            if (ds1307_time->write_bytes(reg_addr, &data, 1)) {
+              ESP_LOGD("ds3231", "I2C wrote 0x%02X to address 0x%02X", data, reg_addr);
+              ESP_LOGI("ds3231", "DS3231 alarm bit(s): Cleared");
+            } else {
+              ESP_LOGE("ds3231", "DS3231 alarm bit(s): I2C write failed.");
+            }
+
+    - priority: -100
+      then:
+        - logger.log: "on_boot: waiting for WiFi..."
+        - wait_until:  
+            condition:      #  any condition here
+              wifi.connected:
+            timeout: 10s
+        - logger.log: "on_boot: WiFi connected! (or timed out)"
+        - lambda: |-
+            if (sntp_time != nullptr) {
+              ESP_LOGI("on_boot", "Calling SNTPComponent update...");
+              sntp_time->update();
+            } else {
+              ESP_LOGE("on_boot", "SNTPComponent is not initialized.");
+            }
+        # - logger.log: "on_boot: ds1307.read_time"
+        # - ds1307.read_time:
+        #     id: ds1307_time
+        - component.update: adc_batt_voltage
+        # - logger.log: "on_boot: consider_deep_sleep..."
+        # - script.execute: consider_deep_sleep
+
+# # To remove ota password...
+# # Must put password in .base.yaml ota: section
+  # on_boot:
+    # - lambda: |-
+        # id(ota_id).set_auth_password("");
+
+esp32:
+  board: dfrobot_beetle_esp32c3
+  variant: esp32c3
+  framework:
+    type: arduino
+
+# binary_sensor:
+
+# api:
+
+mqtt:
+  broker: 192.168.1.200
+  username: !secret mqtt_user
+  password: !secret mqtt_password
+  discovery: true
+
+  # birth_message: # blank
+  # will_message: # blank
+  # topic_prefix: "${dev_name}"
+  # # IF topic_prefix, all candles will all use the share topic!
+  # topic_prefix: "candles"
+  log_topic: "${dev_name}/debug"
+  # birth_message:
+    # topic: ${dev_name}/status
+    # payload: online
+  # will_message:
+    # topic: ${dev_name}/status
+    # payload: offline
+
+  on_json_message:
+  - topic: "ha/light/candles_rgb_mqtt/schedule"
+    then:
+      - lambda: |-
+          // Log the full incoming JSON message
+          std::string json_string;
+          serializeJson(x, json_string);  // Use 'x' as the JsonObject
+          ESP_LOGD("mqtt", "on_json_message: received ha/light/candles_rgb_mqtt/schedule JSON message: %s", json_string.c_str());
+
+          if (x.containsKey("on_tod") && x.containsKey("off_tod")) {
+            std::string new_on_time = x["on_tod"].as<std::string>();
+            std::string new_off_time = x["off_tod"].as<std::string>();
+
+            if (new_on_time != id(on_time)) {
+              ESP_LOGI("main", "Updating ON time: %s -> %s", id(on_time).c_str(), new_on_time.c_str());
+              id(on_time) = new_on_time;
+            }
+
+            if (new_off_time != id(off_time)) {
+              ESP_LOGI("main", "Updating OFF time: %s -> %s", id(off_time).c_str(), new_off_time.c_str());
+              id(off_time) = new_off_time;
+            }
+
+            id(done01_mqtt_schedule) = true;
+            
+          }
+          else {
+            ESP_LOGW("main", "Invalid schedule format received");
+          }
+      - script.execute: schedule_check_and_next
+
+  - topic: "candles/led"
+    then:
+      - lambda: |-
+          // Log the full incoming JSON message
+          std::string json_string;
+          serializeJson(x, json_string);  // Use 'x' as the JsonObject
+          ESP_LOGD("mqtt", "on_json_message: received candles/led JSON message: %s", json_string.c_str());
+
+          LightState *lightState = rgbw_led;  // Implicit cast since AddressableLightState is derived from LightState
+
+          LightCall call = lightState->make_call();
+
+          // Create a mutable JsonObject and copy the contents of 'x' (a JsonObjectConst)
+          DynamicJsonDocument doc(1024); // Adjust size as needed
+          JsonObject obj = doc.to<JsonObject>();
+          obj.set(x);  // Set the content of the mutable JsonObject to the content of x
+
+          // Pass the mutable JsonObject to parse_json
+          LightJSONSchema::parse_json(*lightState, call, obj);
+
+          call.perform();
+
+          id(latest_light_state) = json_string.c_str();  // Store the latest message in a global variable
+
+  on_message:
+
+  - topic: "candles/sleep_interval"
+    then:
+      - lambda: |-
+          id(sleep_interval) = x.c_str();  // Store the latest message in a global variable
+          ESP_LOGD("mqtt", "Received candles/sleep_interval: %s", id(sleep_interval).c_str());  // Log the message
+
+          id(done04_mqtt_sleep_interval) = true;
+
+      # - logger.log: "candles/sleep_interval: consider_deep_sleep"
+      # - script.execute: consider_deep_sleep
+
+    # - topic: schedule/light_control
+    #   then:
+    #     - lambda: |-
+    #         auto json = json::parse(x.c_str());
+    #         if (json.contains("on_tod") && json.contains("off_tod")) {
+    #           std::string new_on_time = json["on_tod"].as<std::string>();
+    #           std::string new_off_time = json["off_tod"].as<std::string>();
+
+    #           if (new_on_time != id(on_time)) {
+    #             ESP_LOGI("main", "Updating ON time: %s -> %s", id(on_time).c_str(), new_on_time.c_str());
+    #             id(on_time) = new_on_time;
+    #             save_global("on_time", new_on_time);
+    #           }
+
+    #           if (new_off_time != id(off_time)) {
+    #             ESP_LOGI("main", "Updating OFF time: %s -> %s", id(off_time).c_str(), new_off_time.c_str());
+    #             id(off_time) = new_off_time;
+    #             save_global("off_time", new_off_time);
+    #           }
+    #         } else {
+    #           ESP_LOGW("main", "Invalid schedule format received");
+    #         }
+
+
+light:
+  - platform: monochromatic
+    output: blue_led_pwm
+    id: blue_led_light
+    name: "Blue LED"
+    restore_mode: ALWAYS_OFF
+    internal: true
+    disabled_by_default: true
+    effects:
+      - pulse:
+      - pulse:
+          name: "Custom Pulse"
+          transition_length: 1.5s
+          update_interval: 1.5s
+          min_brightness: 10%
+          max_brightness: 85%
+    on_turn_on:
+      then:
+        - light.turn_on:
+            id: blue_led_light
+            effect: "Custom Pulse"
+
+  - platform: neopixelbus
+    id: rgbw_led
+    name: "Candle"
+    icon: mdi:candle
+    type: GRBW
+    variant: SK6812
+    pin: GPIO0
+    num_leds: 1
+    default_transition_length: 0s
+    # internal: true # if set to internal, then mqtt cannot control?
+    # disabled_by_default: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    # color_correct: [100%, 100%, 100%, 100%]
+    # color_correct: [1%, 0%, 0%, 10%]
+    # effects:
+    #   - flicker:
+    #   - flicker:
+    #       name: "Custom Flicker"
+    #       alpha: 95%
+    #       intensity: 5%
+    #       # update_interval: 250ms
+
+  # - platform: esp32_rmt_led_strip
+  #   id: rgbw_led
+  #   rgb_order: GRB
+  #   is_rgbw: true
+  #   pin: GPIO21
+  #   num_leds: 1
+  #   rmt_channel: 0
+  #   chipset: SK6812
+  #   name: "Candle"
+  #   icon: mdi:candle
+  #   default_transition_length: 0s
+  #   restore_mode: RESTORE_DEFAULT_OFF
+  #   effects:
+  #     - flicker:
+  #     - flicker:
+  #         name: "Custom Flicker"
+  #         alpha: 95%
+  #         intensity: 5%
+  #         # update_interval: 250ms
+
+# for PWM status led:
+output:
+  - platform: ledc
+    id: blue_led_pwm
+    pin: GPIO8
+    inverted: true
+    min_power: 0%
+    max_power: 100%
+
+  - platform: gpio
+    pin: GPIO10
+    id: debug_gpio
+
+sensor:
+  - platform: adc
+    pin: GPIO3
+    id: adc_batt_voltage
+    name: "Battery Voltage"
+    update_interval: 60s
+    attenuation: 12db
+    #disabled_by_default: true
+    entity_category: diagnostic
+    on_value:
+      then:
+        - logger.log: "ADC sampled battery voltage"
+        - globals.set:
+            id: done02_sntp
+            value: 'true'
+
+deep_sleep:
+  id: deep_sleep1
+  run_duration: 5s
+  sleep_duration: 5s # something went wrong, so sleep a short amount of time to reset and try again
+
+# interval:
+#   - interval: 12s
+#   # - interval: 1.2s
+#     then:
+#       - logger.log: "interval: consider_deep_sleep"
+#       - script.execute: consider_deep_sleep
+
+script:
+  - id: schedule_check_and_next
+    mode: queued
+    then:
+      - lambda: |-
+          auto time = id(sntp_time).now();
+          if (time.is_valid()) {
+            // Convert current time to seconds since midnight
+            int current_seconds = time.hour * 3600 + time.minute * 60 + time.second;
+
+            // Parse on_time and off_time into seconds since midnight
+            int on_seconds = -1, off_seconds = -1;
+            if (id(on_time) != "none") {
+              on_seconds = std::stoi(id(on_time).substr(0, 2)) * 3600 + std::stoi(id(on_time).substr(3, 2)) * 60 + std::stoi(id(on_time).substr(6, 2));
+            }
+            if (id(off_time) != "none") {
+              off_seconds = std::stoi(id(off_time).substr(0, 2)) * 3600 + std::stoi(id(off_time).substr(3, 2)) * 60 + std::stoi(id(off_time).substr(6, 2));
+            }
+
+            if (on_seconds != -1 && off_seconds != -1) {
+              // Determine whether the light should currently be ON or OFF
+              bool light_on = false;
+              if (on_seconds < off_seconds) {
+                // Normal case: on_time < off_time (e.g., 16:00 to 20:00)
+                light_on = (current_seconds >= on_seconds && current_seconds < off_seconds);
+              } else {
+                // Wrapped case: off_time < on_time (e.g., 20:00 to 16:00)
+                light_on = (current_seconds >= on_seconds || current_seconds < off_seconds);
+              }
+
+              if (light_on) {
+                ESP_LOGI("main", "Turning ON the light");
+                id(rgbw_led).turn_on();
+              } else {
+                ESP_LOGI("main", "Turning OFF the light");
+                id(rgbw_led).turn_off();
+              }
+
+              // Calculate the next event
+              int next_event_seconds = -1;
+              if (on_seconds > current_seconds && off_seconds > current_seconds) {
+                next_event_seconds = std::min(on_seconds, off_seconds);
+              } else if (on_seconds > current_seconds || off_seconds > current_seconds) {
+                next_event_seconds = (on_seconds > current_seconds) ? on_seconds : off_seconds;
+              } else {
+                next_event_seconds = std::min(on_seconds, off_seconds) + 24 * 3600; // Add 24 hours for tomorrow
+              }
+
+              // Calculate and log the next event time
+              next_event_seconds %= 24 * 3600; // Wrap around in case of overflow
+              uint8_t next_event_hrs_clock = next_event_seconds / 3600;
+              uint8_t next_event_min_clock = (next_event_seconds % 3600) / 60;
+              uint8_t next_event_sec_clock = next_event_seconds % 60;
+
+              ESP_LOGI("main", "Next event time: %02d:%02d:%02d",
+                       next_event_hrs_clock, next_event_min_clock, next_event_sec_clock);
+
+              if (next_event_seconds == on_seconds) {
+                ESP_LOGI("main", "Next event: Turning ON the light");
+              } else if (next_event_seconds == off_seconds) {
+                ESP_LOGI("main", "Next event: Turning OFF the light");
+              }
+
+                            /*** START RTC CODE ***/
+              ESP_LOGI("ds3231", "Setting ds3231 alarm...");
+              uint8_t reg_addr;
+              uint8_t data[4];
+
+              /** READ ALARM VALUE **/
+              reg_addr = 0x07;
+              ESP_LOGD("i2c", "I2C device read 0x68 at register 0x%02X...", reg_addr);
+              // Read 4 bytes from the device
+              if (ds1307_time->read_bytes(reg_addr, data, 4)) {
+                ESP_LOGD("ds3231-i2c", "I2C read successful: 0x%02X 0x%02X 0x%02X 0x%02X", data[0], data[1], data[2], data[3]);
+              } else {
+                ESP_LOGE("ds3231-i2c", "I2C read failed.");
+              }
+
+              // Helper function for BCD conversion
+              auto decimal_to_bcd = [](uint8_t val) -> uint8_t {
+                return ((val / 10) << 4) | (val % 10);
+              };
+
+              uint8_t hours_bcd = decimal_to_bcd(next_event_hrs_clock);
+              uint8_t minutes_bcd = decimal_to_bcd(next_event_min_clock);
+              uint8_t seconds_bcd = decimal_to_bcd(next_event_sec_clock);
+
+              ESP_LOGI("ds3231", "Alarm time: %02d:%02d:%02d", next_event_hrs_clock, next_event_min_clock, next_event_sec_clock);
+
+              /** WRITE ALARM VALUE **/
+              reg_addr = 0x07;
+              ESP_LOGD("ds3231-i2c", "I2C device write 0x68 at register 0x%02X...", reg_addr);
+              data[0] = seconds_bcd & 0x7F;  // A1M1=0: Match exact second
+              data[1] = minutes_bcd & 0x7F;  // A1M2=0: Match exact minute
+              data[2] = hours_bcd & 0x7F;    // A1M3=0: Match exact hour
+              data[3] = 0x80;                // A1M4=1: Match any day
+              // Write 4 bytes to device
+              if (ds1307_time->write_bytes(reg_addr, data, 4)) {
+                ESP_LOGD("ds3231-i2c", "I2C write successful: 0x%02X 0x%02X 0x%02X 0x%02X", data[0], data[1], data[2], data[3]);
+              } else {
+                ESP_LOGE("ds3231-i2c", "ALARM: I2C write failed.");
+              }
+
+              #define NEOSC 0x80 // Bit 7: Enable Oscillator (nEOSC)
+              #define BBSQW 0x40 // Bit 6: Battery-Backed Square-Wave Enable (BBSQW)
+              #define CONV  0x20 // Bit 5: Convert Temperature (CONV)
+              #define RS2   0x10 // Bit 4: Rate Select (RS2)
+              #define RS1   0x08 // Bit 3: Rate Select (RS1)
+              #define INTCN 0x04 // Bit 2: Interrupt Control (INTCN)
+              #define A2IE  0x02 // Bit 1: Alarm 2 Interrupt Enable (A2IE)
+              #define A1IE  0x01 // Bit 0: Alarm 1 Interrupt Enable (A1IE)
+
+              /** ENABLE ALARM **/
+              reg_addr = 0x0E;
+              ESP_LOGD("i2c", "I2C device read 0x68 at register 0x%02X...", reg_addr);
+              data[0] = A1IE; // INTCN | A1IE to enable alarm, or only A1IE to enable square wave on alarm
+              // Write 1 byte to device
+              if (ds1307_time->write_bytes(reg_addr, data, 1)) {
+                ESP_LOGD("ds3231-i2c", "ALARM: I2C wrote 0x%02X to address 0x%02X", data, reg_addr);
+              } else {
+                ESP_LOGE("ds3231-i2c", "I2C write failed at register 0x%02X", reg_addr);
+              }
+
+              /** READ ALARM VALUE **/
+              reg_addr = 0x07;
+              ESP_LOGD("i2c", "I2C device read 0x68 at register 0x%02X...", reg_addr);
+              // Read 4 bytes from the device
+              if (ds1307_time->read_bytes(reg_addr, data, 4)) {
+                ESP_LOGD("ds3231-i2c", "I2C read successful: 0x%02X 0x%02X 0x%02X 0x%02X", data[0], data[1], data[2], data[3]);
+              } else {
+                ESP_LOGE("ds3231-i2c", "I2C read failed.");
+              }
+
+              ESP_LOGI("ds3231", "Alarm set for %02d:%02d:%02d.",
+                      next_event_hrs_clock, next_event_min_clock, next_event_sec_clock);
+              /*** END RTC CODE ***/
+
+
+            } else {
+              ESP_LOGW("main", "Invalid on_time or off_time");
+            }
+          } else {
+            ESP_LOGW("main", "Invalid current time");
+          }
+
+  - id: sntp_callback
+    mode: queued
+    then:
+      - lambda: |-
+          char str[30];
+          time_t currTime = id(sntp_time).now().timestamp;
+          strftime(str, sizeof(str), "%Y-%m-%d %H:%M", localtime(&currTime));
+          ESP_LOGI("stefan", "Wrote SNTP time to RTC, curTime: %s", str);
+
+          if (ds1307_time != nullptr) {
+            ds1307_time->dump_config();
+            ds1307_time->setup(); // setup() basically only does read_rtc_()
+            ESP_LOGD("stefan", "DS1307Component setup() called.");
+          } else {
+            ESP_LOGE("stefan", "DS1307Component is not initialized.");
+          }
+      # - script.execute: schedule_check_onoff
+      # - script.execute: set_ds3231_alarm
+      - lambda: |-
+          if (ds1307_time != nullptr) {
+            ds1307_time->setup(); // setup() basically only does read_rtc_()
+            ESP_LOGD("stefan", "DS1307Component setup() called.");
+          } else {
+            ESP_LOGE("stefan", "DS1307Component is not initialized.");
+          }
+
+i2c:
+  sda: GPIO4
+  scl: GPIO5
+  # scan: true
+  scan: false
+  id: i2c_bus
+
+time:
+  - platform: ds1307
+    id: ds1307_time
+    update_interval: never
+    
+  - platform: sntp
+    id: sntp_time
+    timezone: America/New_York
+    servers:
+     - 192.168.1.1
+     - 0.pool.ntp.org
+     - 1.pool.ntp.org
+    update_interval: never
+    on_time_sync:
+      then:
+        # ... and update the RTC when the synchronization was successful
+        - ds1307.write_time:
+            id: ds1307_time
+        - lambda: |-
+            ESP_LOGI("sntp.on_time_sync", "SNTP sync'ed...");
+            char str[30];
+            time_t currTime = id(sntp_time).now().timestamp;
+            strftime(str, sizeof(str), "%Y-%m-%d %H:%M", localtime(&currTime));
+            ESP_LOGI("sntp.on_time_sync", "Current time: %s", str);
+
+            id(done02_sntp) = true;
+        
+
+# sun:
+#   latitude: 42.4165986
+#   longitude: -71.1567342
+
+# text_sensor:
+#   - platform: sun
+#     name: Sun Next Sunset
+#     type: sunset
+#     id: sunset_time
+#     internal: true

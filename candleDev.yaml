@@ -1,0 +1,317 @@
+---
+
+#
+#  Trick #1 - dynamic sleep duration
+#  
+#  Since startup, wifi, sensor, and HA sync take anywhere from 2 seconds to 12.
+#  So to achieve a 60s or 600s loop we dynamically adjust how long to sleep
+#
+globals:
+  # - id: delay_int
+    # type: int
+    # restore_value: no
+    # initial_value: '99999'
+
+  - id: mqtt_done_switch
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: mqtt_done_sleep_interval
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: latest_light_state
+    type: std::string
+    restore_value: no
+    initial_value: '"none"'
+    
+  - id: sleep_interval
+    type: std::string
+    restore_value: no
+    initial_value: '"none"'
+
+esphome:
+  name: ${dev_name}
+  friendly_name: ${dev_friendly_name}
+  
+  on_boot:
+    - priority: 600
+      then: 
+        - output.turn_on: debug_gpio
+        - logger.log: "debug_gpio turned ON"
+        # - deep_sleep.prevent: deep_sleep1
+
+    - priority: -101
+      then:
+        - logger.log: "on_boot: consider_deep_sleep..."
+        - script.execute: consider_deep_sleep
+
+# # To remove ota password...
+# # Must put password in .base.yaml ota: section
+  # on_boot:
+    # - lambda: |-
+        # id(ota_id).set_auth_password("");
+
+esp32:
+  board: dfrobot_beetle_esp32c3
+  variant: esp32c3
+  framework:
+    type: arduino
+
+# binary_sensor:
+
+# api:
+
+mqtt:
+  broker: 192.168.1.200
+  username: !secret mqtt_user
+  password: !secret mqtt_password
+  discovery: true
+
+  # birth_message: # blank
+  # will_message: # blank
+  # topic_prefix: "${dev_name}"
+  # # IF topic_prefix, all candles will all use the share topic!
+  # topic_prefix: "candles"
+  # log_topic: "${dev_name}/debug"
+  # birth_message:
+    # topic: ${dev_name}/status
+    # payload: online
+  # will_message:
+    # topic: ${dev_name}/status
+    # payload: offline
+  on_message:
+  - topic: "candles/light/candle/command"
+    then:
+      - lambda: |-
+          id(latest_light_state) = x.c_str();  // Store the latest message in a global variable
+          ESP_LOGD("mqtt", "Received candles/light/candle/command: %s", id(latest_light_state).c_str());  // Log the message
+          
+            // Get the JSON string from the message payload
+            std::string json = x.c_str();  // Access the payload
+
+            // Create a JSON document and deserialize the message
+            DynamicJsonDocument doc(1024);
+            deserializeJson(doc, json);
+
+            // Initialize default brightness multiplier
+            float brightness_multiplier = 1.0;
+
+            // Check for and handle brightness
+            if (doc.containsKey("brightness")) {
+              int brightness = doc["brightness"].as<int>();  // Cast brightness to integer
+              brightness_multiplier = brightness / 255.0;  // Normalize brightness (0-255 to 0-1)
+            }
+
+            // Check for and handle color (RGBW)
+            if (doc.containsKey("color")) {
+              int r = doc["color"]["r"];
+              int g = doc["color"]["g"];
+              int b = doc["color"]["b"];
+              int w = doc["color"]["w"];
+
+              // Apply brightness to RGBW values
+              r = int(r * brightness_multiplier);
+              g = int(g * brightness_multiplier);
+              b = int(b * brightness_multiplier);
+              w = int(w * brightness_multiplier);
+
+              // Get the addressable light object and update the pixels
+              auto light = ((AddressableLight*)id(rgbw_led).get_output());
+              //for (int i = 0; i < id(rgbw_led).num_leds; i++) {
+                light->get(0).set(Color(r, g, b, w));  // Set the RGBW values for each LED
+              //}
+              light->schedule_show();  // Apply the changes to the SK6812 strip
+            }
+
+  - topic: "candles/sleep_interval"
+    then:
+      - lambda: |-
+          id(sleep_interval) = x.c_str();  // Store the latest message in a global variable
+          ESP_LOGD("mqtt", "Received candles/sleep_interval: %s", id(sleep_interval).c_str());  // Log the message
+      - globals.set:
+          id: mqtt_done_sleep_interval
+          value: 'true'
+      - logger.log: "candles/sleep_interval: consider_deep_sleep"
+      - script.execute: consider_deep_sleep
+
+light:
+  - platform: monochromatic
+    output: blue_led_pwm
+    id: blue_led_light
+    name: "Blue LED"
+    restore_mode: ALWAYS_ON
+    internal: true
+    disabled_by_default: true
+    effects:
+      - pulse:
+      - pulse:
+          name: "Custom Pulse"
+          transition_length: 1.5s
+          update_interval: 1.5s
+          min_brightness: 10%
+          max_brightness: 85%
+    on_turn_on:
+      then:
+        - light.turn_on:
+            id: blue_led_light
+            effect: "Custom Pulse"
+
+  - platform: neopixelbus
+    id: rgbw_led
+    name: "Candle"
+    icon: mdi:candle
+    type: GRBW
+    variant: SK6812
+    pin: GPIO21
+    num_leds: 1
+    default_transition_length: 0s
+    # internal: true # if set to internal, then mqtt cannot control?
+    # disabled_by_default: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    # color_correct: [100%, 100%, 100%, 100%]
+    # color_correct: [1%, 0%, 0%, 10%]
+    effects:
+      - flicker:
+      - flicker:
+          name: "Custom Flicker"
+          alpha: 95%
+          intensity: 5%
+          # update_interval: 250ms
+
+# for PWM status led:
+output:
+  - platform: ledc
+    id: blue_led_pwm
+    pin: GPIO8
+    inverted: true
+    min_power: 0%
+    max_power: 100%
+
+  - platform: gpio
+    pin: GPIO10
+    id: debug_gpio
+
+sensor:
+  - platform: adc
+    pin: GPIO3
+    name: "Battery Voltage"
+    update_interval: 60s
+    attenuation: 12db
+    #disabled_by_default: true
+    entity_category: diagnostic
+
+deep_sleep:
+  id: deep_sleep1
+  run_duration: 5s
+  sleep_duration: 5s # something went wrong, so sleep a short amount of time to reset and try again
+
+interval:
+  - interval: 1.2s
+    then:
+      - logger.log: "interval: consider_deep_sleep"
+      - script.execute: consider_deep_sleep
+
+script:
+  - id: consider_deep_sleep
+    mode: queued
+    then:
+      - logger.log: "Running consider_deep_sleep..."
+      - if:
+          # path 1, we dont have connection to HA yet, so just chill for a bit
+          condition:
+            - lambda: |-
+                ESP_LOGD("stefan", "light_mqtt_value: %s  mqtt_done_sleep_interval: %d", id(latest_light_state).c_str(), id(mqtt_done_sleep_interval) );
+                return (id(latest_light_state).c_str()!="none" && id(mqtt_done_sleep_interval));
+          then:
+            - lambda: |-
+                //if ( strncmp( id(sleep_interval).state.c_str(), "always on", 9) == 0 ) {
+                if ( strncmp( id(sleep_interval).c_str(), "always on", 9) == 0 ) {
+                  id(deep_sleep1).prevent_deep_sleep();
+                  ESP_LOGD("stefan", "sleep_interval is always on (for OTA)");
+                }
+                else {
+                  //const char *time_str = id(sleep_interval).state.c_str();
+                  const char *time_str = id(sleep_interval).c_str();
+                  uint32_t value = 0;
+                  char unit = '\0';
+                  // ESP_LOGD("stefan", "sleep_duration string: %s", *time_str );
+
+                  // Skip leading spaces
+                  while (*time_str && isspace(*time_str)) {
+                      time_str++;
+                  }
+
+                  // Extract numeric value
+                  while (*time_str != '\0' && isdigit(*time_str)) {
+                      value = value * 10 + (*time_str - '0');
+                      time_str++;
+                  }
+
+                  // Skip any spaces between the number and unit
+                  while (*time_str && isspace(*time_str)) {
+                      time_str++;
+                  }
+
+                  // Extract the first letter of the unit (h for hours, m for minutes, s for seconds)
+                  if (*time_str != '\0') {
+                      // unit = tolower(*time_str);  // Convert to lowercase to handle case insensitivity
+                      unit = *time_str;  // Convert to lowercase to handle case insensitivity
+                  }
+
+                  // If no valid unit was found, return an error value (-1)
+                  if (unit == '\0') {
+                      value = 0;  // Invalid format
+                  }
+
+                  ESP_LOGD("stefan", "unit character: %c", unit );
+                  // Convert the time based on the unit
+                  switch (unit) {
+                      case 'h':  // hours
+                      case 'H':
+                          value *= 3600;  // 1 hour = 3600 seconds
+                          break;  // don't fall-through
+                      case 'm':  // minutes
+                      case 'M':
+                          value *= 60;   // 1 minute = 60 seconds
+                          break;
+                      case 's':  // seconds
+                      case 'S':
+                          value = value;  // already in seconds
+                          break;
+                      default:
+                          value = 0;
+                          break;
+                  }
+
+                  ESP_LOGD("stefan", "parsed sleep_duration of %d seconds", value );
+                  if (value > 0) {
+                    ESP_LOGD("stefan", "debug_gpio turned OFF");
+                    id(debug_gpio).turn_off();
+                    
+                    id(deep_sleep1).allow_deep_sleep();
+                    id(deep_sleep1).set_run_duration(0);
+                    id(deep_sleep1).set_sleep_duration(value * 1000);
+                    id(deep_sleep1).begin_sleep();
+                  }
+                }
+          else:
+            - logger.log: "mqtt_done_switch is false!"
+
+# text_sensor:
+
+  # - platform: mqtt_subscribe
+    # name: "Candles Sleep Interval"
+    # id: sleep_interval
+    # topic: "candles/sleep_interval"
+    # internal: true
+    # disabled_by_default: true
+    # entity_category: diagnostic
+    # on_value:
+      # - globals.set:
+          # id: mqtt_done_sleep_interval
+          # value: 'true'
+      # - logger.log: "candles/sleep_interval: consider_deep_sleep"
+      # - script.execute: consider_deep_sleep

@@ -1,0 +1,10 @@
+substitutions:
+  # https://esphome.io/guides/configuration-types.html#substitutions
+  dev_name: plug01               # hostname & entity_id
+  dev_friendly_name: Plug 01     # Displayed in HA frontend
+  dev_use_address: "${dev_name}.local"
+  #dev_use_address: "etekcity-dining1.local"
+  dev_icon: mdi:power-plug
+
+<<: !include .base.yaml
+<<: !include .etekcity_plug.yaml

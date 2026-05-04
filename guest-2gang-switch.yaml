@@ -1,0 +1,228 @@
+### https://gist.github.com/andy-cooper/8d49f513b85b5f2e4f304c8284de1293
+###
+# Before you wonder if there's actually YAML here, yes there is - but I also wanted to include as much of a 
+# complete guide to getting ESPHome onto the Tuya CBU found in this switch and configuring it for use in a home,
+# because there was absolutely zero good documentation on this and I had to work a lot by trial and error.
+#
+# The MOES WS-B-US switch - https://www.amazon.com/gp/product/B0C3HGGYHG/ - uses a Tuya CBU processor which is 
+# very similar to the ESP8266 chip, but does not work out of the box with ESPHome, and with current levels of
+# firmware from Tuya, tuya-convert and any other OTA attack fails. That means that you need to open the switch
+# up and flash in a different firmware via serial connection, achieved most easily via a USB-to-Serial / TTL 
+# board like this one at Amazon - https://www.amazon.com/dp/B075N82CDL. It's important to note you want a board
+# that has a stable voltage regulation. This one appears to have that, and has a switch to specify either 5V or 3V3.
+#
+# The Tuya module datasheet for this is located at 
+# https://developer.tuya.com/en/docs/iot/cbu-module-datasheet?id=Ka07pykl5dk4u#title-3-Module%20interfaces
+#
+# The switch is very easy to open, with a little clip on top of it that can be accessed by pulling the parts
+# apart a fraction, and then inserting a small flat-head screwdriver to unclip things. Once it is unclipped, the
+# front and back separate readily. Note that there is a little 6 pin GPIO header that plugs between the two
+# components.
+#
+# Once separated, you need to solder 2 wires to the TX and RX CPU pins on the board - yes, directly to the pins
+# because they are not connected to the GPIO headers. Fortunately, however, you do not need to solder for VCC or
+# ground, because those are available on the GPIO header.
+#
+# UART_TX1 is pin 15
+# UART_RX1 is pin 16
+# 3V3 (VCC) is pin 14
+# GND is pin 13
+# CEN (reset pin) is pin 18
+#
+# Remember that TX on the CPU must go to RX on the USB-to-TTL adapter, and RX on the CPU must go to TX.
+# If you hold the board such that the GPIO pins are oriented vertically on the right hand bottom side of the 
+# circuit board, 3V3 is the bottom right pin, and GND is the middle right pin. Use a jumper wire to connect
+# these to the USB-to-TTL adapter.
+#
+# With a similar orientation of the circuit board as described above, the pins are numbered from top left (pin 1) to bottom
+# left (pin 7), then on the bottom of the chip, pins 7-14, and then on the right hand side, from bottom to top are
+# pins 15-21. That means that you care about the bottom right corner of the chip and the pin 4th from the right hand 
+# side top.
+#
+# In order to flash the initial ESPHome firmware, you need a couple of things
+# 1. You need some platform on which to run things. Most people seem to use Windows because that's where the 
+#    (currently) best tools for flashing firmware seem to exist. I suspect you could use a Windows VM if needs be,
+#    but I have not tried that. The flashing tool that I used was the LibreTiny flashing tool that you can find
+#    at https://github.com/libretiny-eu/ltchiptool. If you have zero Windows access at all, there are some linux
+#    tools that may work like https://github.com/OpenBekenIOT/hid_download_py, but I have not tried them. I also
+#    noticed that there is a CLI for ltchiptool that seems to be python, so it's quite possible that may work just
+#    fine on Linux or MacOS. Again, I haven't tried it.
+# 2. You need at least version 2023.12 of ESPHome firmware, because that includes libretiny - the flashing guide for
+#    libretiny is located at https://docs.libretiny.eu/docs/flashing/esphome/. More on this below.
+# 3. A soldering iron, with *LOW TEMPERATURE* solder. Some very thin wires for attaching to the CBU module TX/RX pins.
+# 4. A stiff drink to steady your nerves before engaging in soldering activities. On the plus side, this is not an
+#    expensive switch, so if you burn it out, it's not the end of the world.
+# 
+# Step 1 - solder 2 wires to pins 15 (TX) and 16 (RX) on the CBU module.
+# Step 2 - connect 2 jumpers to the specified pins for VCC (3V3) and GND on the GPIO header
+# Step 3 - connect the TX wire from the CBU module to the RX pin on the USB-to-TTL adapter
+# Step 4 - connect the RX wire from the CBU module to the TX pin on the USB-to-TTL adapter
+# Step 5 - connect the VCC (3V3) jumper from the GPIO header to the VCC pin on the USB-to-TTL adapter
+# Step 6 - connect the GND jumper from the GPIO header to the GND pin on the USB-to-TTL adapter
+#
+# You are now set up to be able to dump the original firmware - always recommended. Use ltchiptool to dump the
+# original firmware - and save it as a backup - from the switch. To do this, follow the instructions at 
+# https://docs.libretiny.eu/docs/flashing/tools/ltchiptool/. Obviously that means you need to plug the USB-to-TTL
+# adapter into a PC or desktop, and if on Linux know the device path (often something like /dev/ttyUSB0 or /dev/ttyAMC0).
+# If all goes well, you'll see some red and green blinky-flashy lights on the USB-to-TTL adapter. You won't see anything
+# on the module, but you should see the little circular lights on the switch buttons light up.
+# Follow the guide noted above to backup the original firmware.
+#
+# OK, now that you've got the original firmware safely stashed away, it's time to figure out *what* it is that you
+# actually want to flash onto the CBU module. That was not immediately obvious from reading a bunch of things that
+# basically say "and then you flash it..." (which occurs shortly after "and then a miracle occurs").
+#
+# Broadly speaking, you're going to want to use LibreTiny or ESPHome to create a firmware binary that is ultimately
+# customized to the chip. If you've made it this far in reading this super-long comment, that's where this YAML
+# file actually comes in - it is the ESPHome configuration you've been praying for that actually makes the switch
+# work (and for those who have tried to generate a YAML from the dumped original firmware that analyzes it, no, that
+# does not work correctly, but it's pretty close).
+#
+# Generating the firmware file - this can be done via the command line (described below), or by the Home Assistant plugin
+# if you are using Home Assistant (install ESPHome integration, start it, switch to its gui, create a new device, copy
+# and paste this gist as a yaml file, click "Install", follow the prompts. Make sure you use Chrome or Firefox because
+# for a locally attached USB device the browser needs to support WebSerial, which Safari does not).
+#
+# For those who want the unabridged experience via the command line, or for those who are not using Home Assistant,
+# follow the steps below.
+#
+# Step 1 - install LibreTiny or the latest ESPHome (opt for the latter, IMO, because it now incorporates LibreTiny)
+# Step 2 - Save this gist (or at least the YAML bits below) as a yaml file - call it whatever you'd like, but for the 
+#          purposes of this guide I'll call it device.yaml
+# Step 3 - Compile the yaml. Do this by executing the command "esphome compile device.yaml". 
+# Step 4 - Upload the yaml to the device. Before doing so, make sure you've plugged things in as described above.
+#          You do this by running "esphome upload device.yaml"
+# Step 5 - If you want to actually combine steps 3 and 4, you can run "esphome run device.yaml" instead. That will
+#          compile and install the firmware all in one step.
+#
+# Assuming all goes well with either of the above methods, you should see a "Flash successful" kind of message. 
+# Congratulations, you have now removed the Tuya firmware and installed the ESPHome firmware. If you are using
+# Home Assistant, congratulations, you already have the new switch in your setup, and you can proceed with 
+# automations or customizing the YAML file below.
+# 
+# If you are using something else, you probably want to remove the API lines in the YAML file and insert whatever
+# is needed for your home automation software.
+#
+# This YAML supports the two buttons (relays) operating as 2 switches. The little circular lights are on when the 
+# switch is off, and off when the switch is on. If you want them reversed such that they are on when the switch is
+# on, and off when the switch is off, reverse the true/false for the inverted parameter in the output section, or
+# switch the light.turn_on and light.turn_off commands around in the on_turn_on/on_turn_off stanzas in the switch
+# section of the YAML.
+#
+# With that, good luck, happy flashing and hopefully this all makes things a little easier for you.
+#
+#
+#
+#
+
+
+esphome:
+  name: "guest-2gang-switch"
+  friendly_name: "Guest 2-Gang Switch"
+
+# Board type is a Tuya CBU. If your compile fails with an invalid board type, that means you do not have a version
+# of ESPHome installed that includes LibreTiny - a minimum of 2023.12 is required.
+bk72xx:
+  board: cbu
+
+# We don't want any logs to use the UART, so set the baud rate to 0
+logger:
+  baud_rate: 0
+
+# I like having the web server running for extra validation. It's not necessary, so you can remove it. 
+# The ESPHome web server for this device will be at http://moes-2-gang-wifi-switch.local/
+web_server:
+  port: 80
+  version: 1
+
+# Fallback WiFi AP if something has gone horribly wrong
+captive_portal:
+
+# Decide if you're using Home Assistant or not. If not, you can remove it. Also, decide if you want to 
+# protect things with a password or not.
+api:
+  # password: !secret api_password
+  # encryption:
+    # key: !secret api_key
+
+ota:
+  - platform: esphome
+
+# This is the WiFi AP that the ESPHome device will join to. Typically it is your home WiFi network credentials.
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${dev_name} Fallback Hotspot"
+    password: !secret wifi_fallback_ap_password
+
+# The version of ESPHome that will be reported
+text_sensor:
+  - platform: libretiny
+    version:
+      name: LibreTiny Version
+
+# Here's where the dump analyzer gets things wrong. You need a GPIO output. Inverted = false means that the LEDs wil
+# be on when the lights are off and off when the lights are on
+output:
+  - platform: gpio
+    id: output_led_1
+    pin:
+      number: P14
+      inverted: false
+  - platform: gpio
+    id: output_led_2
+    pin:
+      number: P20
+      inverted: false
+
+# platform is binary, not monochromatic
+light:
+  - platform: binary
+    id: light_switch_1
+    output: output_led_1
+  - platform: binary
+    id: light_switch_2
+    output: output_led_2
+
+binary_sensor:
+  - platform: gpio
+    id: binary_switch_1
+    pin:
+      number: P23
+      inverted: true
+      mode: INPUT_PULLUP
+    on_press:
+      then:
+        - switch.toggle: switch_1
+  - platform: gpio
+    id: binary_switch_2
+    pin:
+      number: P28
+      inverted: true
+      mode: INPUT_PULLUP
+    on_press:
+      then:
+        - switch.toggle: switch_2
+
+# the relay switch
+switch:
+  - platform: gpio
+    id: switch_1
+    name: Relay 1
+    pin: P24
+    on_turn_on:
+      - light.turn_on : light_switch_1
+    on_turn_off:
+      - light.turn_off: light_switch_1
+  - platform: gpio
+    id: switch_2
+    name: Relay 2
+    pin: P26
+    on_turn_on:
+      - light.turn_on: light_switch_2
+    on_turn_off:
+      - light.turn_off: light_switch_2
+
+
+
