@@ -136,6 +136,11 @@ esp32:
   variant: esp32c3
   framework:
     type: arduino
+    sdkconfig_options:
+      # Wake-time savings in the 2nd-stage bootloader. These live in the bootloader, which OTA
+      # never updates, so they only take effect after a USB flash of firmware.factory.bin.
+      CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP: y  # skip hashing the ~1.1MB app on wake (~200ms)
+      CONFIG_BOOTLOADER_LOG_LEVEL_WARN: y               # no partition-table/segment prints (~100ms at 115200)
 
 # binary_sensor:
 
@@ -424,6 +429,7 @@ script:
                     ESP_LOGD("stefan", "debug_gpio turned OFF");
                     id(debug_gpio).turn_off();
                     
+                    esp_deep_sleep_disable_rom_logging();  // no ESP-ROM banner on next wake (~30ms at 115200)
                     id(deep_sleep1).allow_deep_sleep();
                     id(deep_sleep1).set_run_duration(0);
                     id(deep_sleep1).set_sleep_duration(value * 1000);
