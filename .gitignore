@@ -7,3 +7,6 @@
 /MaxiTPMS-Pad-STM32F105RCT6/
 /old-versions/
 /src/
+
+# Claude Code personal settings
+/.claude/settings.local.json
