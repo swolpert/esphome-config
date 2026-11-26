@@ -23,7 +23,7 @@ ota:
   - platform: esphome
     # password: !secret ota_password
 # # To remove ota password...
-    # password: "c3b63e293c67552afd8603a52199306e"
+    # password: "OLD_OTA_PASSWORD"  # put the previous OTA password here
     # id: ota_id
 
 # Enable Web server.
