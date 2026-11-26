@@ -27,8 +27,9 @@ captive_portal:
 # Enable logging
 logger:
   # https://esphome.io/components/logger
-  # level: INFO
-  level: DEBUG
+  # INFO: skips the per-wake config dump and DEBUG chatter (faster wakes on battery candles)
+  level: INFO
+  # level: DEBUG
   # level: VERBOSE
   # level: VERY_VERBOSE
   baud_rate: 115200

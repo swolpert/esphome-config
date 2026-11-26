@@ -145,7 +145,10 @@ mqtt:
   broker: 192.168.1.200
   username: !secret mqtt_user
   password: !secret mqtt_password
-  discovery: true
+  # HA's discovery config for this candle (battery voltage; both lights are internal) is already
+  # retained on the broker, so skip republishing it and the discovery subscriptions on every wake.
+  # Set to true for one wake if entities are added.
+  discovery: false
   # Don't connect at setup: that happens ~150ms before WiFi is up, fails, and the client's
   # 5s retry throttle then delays MQTT to ~5.1s after boot. on_boot enables MQTT once WiFi connects.
   enable_on_boot: false
