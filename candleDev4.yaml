@@ -145,6 +145,7 @@ esp32:
       CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP: y  # skip hashing the ~1.1MB app on wake (~200ms)
       CONFIG_BOOTLOADER_LOG_LEVEL_WARN: y               # no partition-table/segment prints (~100ms at 115200)
       CONFIG_LWIP_DHCP_DOES_ARP_CHECK: n                # DHCP: skip the ARP conflict probe on each lease
+      CONFIG_LWIP_DHCP_RESTORE_LAST_IP: y               # DHCP: re-request the last IP (no DISCOVER); NVS write only when the IP changes
 
 # Local copy of ESPHome 2026.9.1's mqtt component without the 100ms post-connect delay.
 # See components/README.md before upgrading ESPHome.
