@@ -22,9 +22,7 @@ Every device file sets `substitutions:` (`dev_name`, `dev_friendly_name`, `dev_u
 
 Put per-device values in the device file's substitutions, not in shared layers. A change to a shared layer affects every device that includes it.
 
-Known broken as of ESPHome 2026.11:
-- `candle02`–`candle10` fail validation: `.esp32_candlestick.yaml` uses `time: platform: homeassistant`, but no layer defines `api:`.
-- `candle-test.yaml` includes `baseCandel.yaml`, which is a typo; the file doesn't exist.
+`candle01`, `candle02`, `candle-test` and `den1` were checked against ESPHome 2026.11.1. All four validate, and the three candles also compile. Current ESPHome rejects `update_interval` on `wifi_info` sub-sensors; the old dot-file variants still have it.
 
 ## Candle hardware
 
