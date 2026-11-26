@@ -55,13 +55,45 @@ globals:
     restore_value: no
     initial_value: '0'
 
+  # Boot log capture: log lines from before MQTT connects can't go out over MQTT, so they are
+  # buffered here and published once to ${dev_name}/bootlog after the connection comes up.
+  - id: early_log
+    type: std::string
+    restore_value: no
+  - id: early_log_done
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: main_task
+    type: void *
+    restore_value: no
+    initial_value: 'nullptr'
+
 esphome:
   name: ${dev_name}
   friendly_name: ${dev_friendly_name}
   
   on_boot:
+    - priority: 800  # early, before WiFi (250) and MQTT (200) set up
+      then:
+        - lambda: |-
+            id(early_log).reserve(4096);
+            id(main_task) = (void *) xTaskGetCurrentTaskHandle();
+            if (logger::global_logger != nullptr) {
+              logger::global_logger->add_log_callback(nullptr,
+                  [](void *, uint8_t level, const char *tag, const char *message, size_t len) {
+                    // Main loop task only: the MQTT backend logs from its own task.
+                    if (id(early_log_done) || (void *) xTaskGetCurrentTaskHandle() != id(main_task)) return;
+                    if (id(early_log).size() + len + 12 > 4000) return;
+                    char ts[12];
+                    snprintf(ts, sizeof(ts), "%6u ", (unsigned) millis());
+                    id(early_log).append(ts);
+                    id(early_log).append(message, len);
+                    id(early_log).push_back('\n');
+                  });
+            }
     - priority: 600
-      then: 
+      then:
         - output.turn_on: debug_gpio
         - logger.log: "debug_gpio turned ON"
         # - deep_sleep.prevent: deep_sleep1
@@ -74,7 +106,12 @@ esphome:
             condition:
               mqtt.connected:
             timeout: 30s
-        - lambda: 'id(t_mqtt) = millis();'
+        - lambda: |-
+            id(t_mqtt) = millis();
+            id(early_log_done) = true;
+            mqtt::global_mqtt_client->publish("${dev_name}/bootlog", id(early_log));
+            id(early_log).clear();
+            id(early_log).shrink_to_fit();
 
     - priority: -101
       then:
