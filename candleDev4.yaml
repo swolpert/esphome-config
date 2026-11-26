@@ -411,9 +411,13 @@ script:
 
                   ESP_LOGD("stefan", "parsed sleep_duration of %u seconds", (unsigned) value );
                   if (value > 0) {
-                    ESP_LOGI("waketime", "wifi=%u mqtt=%u led=%u interval=%u sleep=%u ms since boot",
+                    char wt[96];
+                    snprintf(wt, sizeof(wt), "wifi=%u mqtt=%u led=%u interval=%u sleep=%u ms since boot",
                              (unsigned) id(t_wifi), (unsigned) id(t_mqtt), (unsigned) id(t_led),
                              (unsigned) id(t_interval), (unsigned) millis());
+                    ESP_LOGI("waketime", "%s", wt);
+                    // Published directly (retained): log lines this close to sleep don't get out over MQTT.
+                    mqtt::global_mqtt_client->publish("${dev_name}/waketime", wt, 0, true);
                     ESP_LOGD("stefan", "debug_gpio turned OFF");
                     id(debug_gpio).turn_off();
                     
