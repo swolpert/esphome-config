@@ -80,6 +80,8 @@ globals:
 esphome:
   name: ${dev_name}
   friendly_name: ${dev_friendly_name}
+  includes:
+    - candle_includes.h
   
   on_boot:
     - priority: 800  # early, before WiFi (250) and MQTT (200) set up
