@@ -39,6 +39,23 @@ DFRobot Beetle ESP32-C3 (Arduino framework). SK6812 RGBW LED on GPIO0 (`neopixel
 
 MQTT topics under `candles/` are shared by all candles; per-device topics use `${dev_name}`. Don't set a global `topic_prefix`.
 
-Lambdas must use ArduinoJson 7 APIs (`JsonDocument doc;` with no capacity argument, and `obj["k"].is<T>()` instead of `containsKey`).
+JSON in lambdas: use `DynamicJsonDocument doc(1024);` and `obj["k"].is<T>()`. They compile on both ArduinoJson 6 and 7 (DynamicJsonDocument is deprecated on 7 but builds), so configs work on the user's pinned ESPHome and on newer ones. `JsonDocument doc;` is 7-only; `containsKey` is deprecated.
 
 Deprecations due in ESPHome 2027.1: `web_server: version: 1` (used in the base layers), and `neopixelbus` on ESP32, which should move to `esp32_rmt_led_strip`.
+
+## Wake time (battery candles, candleDev4)
+
+The goal is a short wake → sleep cycle. Measured on the debug pin (GPIO10) with a scope: it went from 5.7 s to ~0.41 s on 2026-11-25. What mattered:
+- **MQTT `enable_on_boot: false`, then `mqtt.enable` in `on_boot` once `wifi.connected`.** ESPHome starts MQTT at setup, before WiFi is up. That first attempt fails, and the client's 5 s retry throttle (`now - connect_begin_ > 5000`) pushed the connect to ~5.1 s after boot.
+- `mqtt: discovery: false`. The HA discovery config for the battery-voltage sensor is already retained on the broker, and the lights are internal. Turn it on for one wake if entities are added.
+- Logger at INFO in `baseCandle.yaml`, so there's no per-wake config dump or DEBUG output at 115200 baud.
+- `esp32: framework: sdkconfig_options`: `CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP` (~200 ms) and `CONFIG_BOOTLOADER_LOG_LEVEL_WARN` (~100 ms). **These live in the bootloader, and OTA never updates it.** Changes there need a USB flash of `firmware.factory.bin`: BOOT+RST into download mode, then web.esphome.io. `esp_deep_sleep_disable_rom_logging()` before sleep removes the ROM banner, and works over OTA.
+
+Telemetry the candle publishes on each wake:
+- `${dev_name}/waketime` (retained): `millis()` at WiFi, MQTT, first `candles/led`, first `candles/sleep_interval`, and the sleep decision.
+- `${dev_name}/bootlog`: the log lines from before MQTT connects (MQTT logging can't send them), excluding CONFIG-level lines.
+
+Log lines logged right before sleeping often don't make it out over MQTT, so publish anything important directly. Serial logs come out on UART0 TX = GPIO21 at 115200 baud, not on the USB-C port.
+
+OTA works during a short wake (the upload holds the candle awake). From the ESPHome container: wait for `ping 192.168.2.137`, then `esphome upload ... --device 192.168.2.137`. After an OTA reboot, the first wake does a full WiFi connect (~2.7 s).
+
