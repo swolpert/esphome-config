@@ -45,17 +45,21 @@ Deprecations due in ESPHome 2027.1: `web_server: version: 1` (used in the base l
 
 ## Wake time (battery candles, candleDev4)
 
-The goal is a short wake → sleep cycle. Measured on the debug pin (GPIO10) with a scope: it went from 5.7 s to ~0.41 s on 2026-11-25. What mattered:
+The goal is a short wake → sleep cycle. The debug pin (GPIO10) goes high at boot and drops in an `esp_deep_sleep_register_hook()` callback, i.e. after ESPHome's shutdown/teardown, so a scope sees the whole wake. On 2026-11-25 the wake went from 5.7 s to ~0.41 s with a static IP. With DHCP (the current setup, chosen for easier IP management) it's ~1.4 s, because DHCP alone takes ~1.0 s on the IoT VLAN. To go back to a static IP, uncomment `manual_ip` in `baseCandle.yaml` and set `dev_static_ip` per candle. The user rejected caching the DHCP lease in RTC memory as too complex.
+
+What mattered:
 - **MQTT `enable_on_boot: false`, then `mqtt.enable` in `on_boot` once `wifi.connected`.** ESPHome starts MQTT at setup, before WiFi is up. That first attempt fails, and the client's 5 s retry throttle (`now - connect_begin_ > 5000`) pushed the connect to ~5.1 s after boot.
-- `mqtt: discovery: false`. The HA discovery config for the battery-voltage sensor is already retained on the broker, and the lights are internal. Turn it on for one wake if entities are added.
+- **`components/mqtt`**: a vendored copy of ESPHome 2026.9.1's mqtt component without the hard-coded `delay(100)` after connect. See `components/README.md`; it must be refreshed or removed when ESPHome is upgraded.
+- `mqtt: discovery: false`. The battery-voltage discovery config is already retained on the broker, and the lights are internal. Turn it on for one wake if entities are added.
 - Logger at INFO in `baseCandle.yaml`, so there's no per-wake config dump or DEBUG output at 115200 baud.
-- `esp32: framework: sdkconfig_options`: `CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP` (~200 ms) and `CONFIG_BOOTLOADER_LOG_LEVEL_WARN` (~100 ms). **These live in the bootloader, and OTA never updates it.** Changes there need a USB flash of `firmware.factory.bin`: BOOT+RST into download mode, then web.esphome.io. `esp_deep_sleep_disable_rom_logging()` before sleep removes the ROM banner, and works over OTA.
+- `esp32: framework: sdkconfig_options`: `CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP` (~200 ms) and `CONFIG_BOOTLOADER_LOG_LEVEL_WARN` (~100 ms). **These live in the bootloader, and OTA never updates it.** Changes there need a USB flash of `firmware.factory.bin` (BOOT+RST into download mode, then web.esphome.io). `esp_deep_sleep_disable_rom_logging()` before sleep removes the ROM banner, and works over OTA. `CONFIG_LWIP_DHCP_RESTORE_LAST_IP` and `CONFIG_LWIP_DHCP_DOES_ARP_CHECK: n` are set but made no measurable difference.
 
 Telemetry the candle publishes on each wake:
-- `${dev_name}/waketime` (retained): `millis()` at WiFi, MQTT, first `candles/led`, first `candles/sleep_interval`, and the sleep decision.
+- `${dev_name}/waketime` (retained): `millis()` at association (`assoc`), DHCP (`gotip`), ESPHome WiFi connected, MQTT, first `candles/led`, first `candles/sleep_interval`, and the sleep decision, plus the current IP.
 - `${dev_name}/bootlog`: the log lines from before MQTT connects (MQTT logging can't send them), excluding CONFIG-level lines.
 
 Log lines logged right before sleeping often don't make it out over MQTT, so publish anything important directly. Serial logs come out on UART0 TX = GPIO21 at 115200 baud, not on the USB-C port.
 
-OTA works during a short wake (the upload holds the candle awake). From the ESPHome container: wait for `ping 192.168.2.137`, then `esphome upload ... --device 192.168.2.137`. After an OTA reboot, the first wake does a full WiFi connect (~2.7 s).
+`run_duration: 30s` is a deliberate safety net: if a wake gets stuck, the candle sleeps anyway so the battery survives (a frozen loop is caught by the task watchdog instead). `candles/sleep_interval` = `always on` prevents sleep as soon as it's received, overriding the 30 s fallback; it's meant for OTA.
 
+**OTA procedure** (the user's rule): publish retained `always on` to `candles/sleep_interval`, wait until the candle stays reachable, upload from the ESPHome container (`esphome upload ... --device <ip from waketime>`), then publish the previous interval back (e.g. `8 sec (test)`). With DHCP the IP can change; read it from `candle01/waketime`.
