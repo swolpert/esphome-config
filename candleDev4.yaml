@@ -106,6 +106,15 @@ esphome:
                     id(early_log).push_back('\n');
                   });
             }
+    - priority: 240  # after WiFi setup (250) created the default event loop, before association
+      then:
+        - lambda: |-
+            // Timestamp association vs. DHCP separately (ESPHome's wifi.connected means "has IP").
+            esp_err_t e1 = esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED,
+                [](void *, esp_event_base_t, int32_t, void *) { if (id(t_assoc) == 0) id(t_assoc) = millis(); }, nullptr);
+            esp_err_t e2 = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                [](void *, esp_event_base_t, int32_t, void *) { if (id(t_gotip) == 0) id(t_gotip) = millis(); }, nullptr);
+            if (e1 != ESP_OK || e2 != ESP_OK) ESP_LOGW("waketime", "event hook register failed: %d %d", e1, e2);
     - priority: 600
       then:
         - output.turn_on: debug_gpio
@@ -254,6 +263,12 @@ mqtt:
           if (id(t_interval) == 0) id(t_interval) = millis();
           id(sleep_interval) = x.c_str();  // Store the latest message in a global variable
           ESP_LOGD("mqtt", "Received candles/sleep_interval: %s", id(sleep_interval).c_str());  // Log the message
+          // "always on" (for OTA) takes effect immediately, even if other inputs haven't arrived.
+          // It overrides the 30s run_duration fallback until a normal interval is received.
+          if (strncmp(id(sleep_interval).c_str(), "always on", 9) == 0) {
+            id(deep_sleep1).prevent_deep_sleep();
+            ESP_LOGI("candle", "sleep_interval 'always on': deep sleep prevented (30s fallback ignored)");
+          }
       - globals.set:
           id: mqtt_done_sleep_interval
           value: 'true'
@@ -384,7 +399,7 @@ script:
                 //if ( strncmp( id(sleep_interval).state.c_str(), "always on", 9) == 0 ) {
                 if ( strncmp( id(sleep_interval).c_str(), "always on", 9) == 0 ) {
                   id(deep_sleep1).prevent_deep_sleep();
-                  ESP_LOGD("stefan", "sleep_interval is always on (for OTA)");
+                  ESP_LOGI("candle", "sleep_interval is always on (for OTA): staying awake");
                 }
                 else {
                   //const char *time_str = id(sleep_interval).state.c_str();
