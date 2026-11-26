@@ -102,12 +102,8 @@ esphome:
             timeout: 10s
         - logger.log: "on_boot: WiFi connected! (or timed out)"
         - lambda: |-
-            if (sntp_time != nullptr) {
-              ESP_LOGI("on_boot", "Calling SNTPComponent update...");
-              sntp_time->update();
-            } else {
-              ESP_LOGE("on_boot", "SNTPComponent is not initialized.");
-            }
+            ESP_LOGI("on_boot", "Calling SNTPComponent update...");
+            sntp_time->update();
         # - logger.log: "on_boot: ds1307.read_time"
         # - ds1307.read_time:
         #     id: ds1307_time
@@ -159,7 +155,7 @@ mqtt:
           serializeJson(x, json_string);  // Use 'x' as the JsonObject
           ESP_LOGD("mqtt", "on_json_message: received ha/light/candles_rgb_mqtt/schedule JSON message: %s", json_string.c_str());
 
-          if (x.containsKey("on_tod") && x.containsKey("off_tod")) {
+          if (x["on_tod"].is<const char*>() && x["off_tod"].is<const char*>()) {
             std::string new_on_time = x["on_tod"].as<std::string>();
             std::string new_off_time = x["off_tod"].as<std::string>();
 
@@ -194,7 +190,7 @@ mqtt:
           LightCall call = lightState->make_call();
 
           // Create a mutable JsonObject and copy the contents of 'x' (a JsonObjectConst)
-          DynamicJsonDocument doc(1024); // Adjust size as needed
+          JsonDocument doc;  // ArduinoJson 7 sizes itself; it takes no capacity argument
           JsonObject obj = doc.to<JsonObject>();
           obj.set(x);  // Set the content of the mutable JsonObject to the content of x
 
@@ -465,7 +461,7 @@ script:
               data[0] = A1IE; // INTCN | A1IE to enable alarm, or only A1IE to enable square wave on alarm
               // Write 1 byte to device
               if (ds1307_time->write_bytes(reg_addr, data, 1)) {
-                ESP_LOGD("ds3231-i2c", "ALARM: I2C wrote 0x%02X to address 0x%02X", data, reg_addr);
+                ESP_LOGD("ds3231-i2c", "ALARM: I2C wrote 0x%02X to address 0x%02X", data[0], reg_addr);
               } else {
                 ESP_LOGE("ds3231-i2c", "I2C write failed at register 0x%02X", reg_addr);
               }
@@ -501,22 +497,14 @@ script:
           strftime(str, sizeof(str), "%Y-%m-%d %H:%M", localtime(&currTime));
           ESP_LOGI("stefan", "Wrote SNTP time to RTC, curTime: %s", str);
 
-          if (ds1307_time != nullptr) {
-            ds1307_time->dump_config();
-            ds1307_time->setup(); // setup() basically only does read_rtc_()
-            ESP_LOGD("stefan", "DS1307Component setup() called.");
-          } else {
-            ESP_LOGE("stefan", "DS1307Component is not initialized.");
-          }
+          ds1307_time->dump_config();
+          ds1307_time->setup(); // setup() basically only does read_rtc_()
+          ESP_LOGD("stefan", "DS1307Component setup() called.");
       # - script.execute: schedule_check_onoff
       # - script.execute: set_ds3231_alarm
       - lambda: |-
-          if (ds1307_time != nullptr) {
-            ds1307_time->setup(); // setup() basically only does read_rtc_()
-            ESP_LOGD("stefan", "DS1307Component setup() called.");
-          } else {
-            ESP_LOGE("stefan", "DS1307Component is not initialized.");
-          }
+          ds1307_time->setup(); // setup() basically only does read_rtc_()
+          ESP_LOGD("stefan", "DS1307Component setup() called.");
 
 i2c:
   sda: GPIO4
