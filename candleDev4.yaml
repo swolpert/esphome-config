@@ -103,7 +103,7 @@ mqtt:
           LightCall call = lightState->make_call();
 
           // Create a mutable JsonObject and copy the contents of 'x' (a JsonObjectConst)
-          JsonDocument doc(1024); // Adjust size as needed
+          JsonDocument doc;  // ArduinoJson 7 sizes itself; it takes no capacity argument
           JsonObject obj = doc.to<JsonObject>();
           obj.set(x);  // Set the content of the mutable JsonObject to the content of x
           //obj.remove("color_mode");  // <-- REMOVE THIS KEY
@@ -270,7 +270,7 @@ script:
                 ESP_LOGD("stefan", "light_mqtt_value: %s",         id(latest_light_state).c_str() );
                 ESP_LOGD("stefan", "mqtt_done_sleep_interval: %d", id(mqtt_done_sleep_interval)   );
                 ESP_LOGD("stefan", "adc_done_switch: %d",          id(adc_done_switch)            );
-                return (id(latest_light_state).c_str()!="none" && id(mqtt_done_sleep_interval) && id(adc_done_switch));
+                return (id(latest_light_state) != "none" && id(mqtt_done_sleep_interval) && id(adc_done_switch));
           then:
             - logger.log: "*** consider_deep_sleep is TRUE!  ***"
             - lambda: |-
@@ -333,7 +333,7 @@ script:
                           break;
                   }
 
-                  ESP_LOGD("stefan", "parsed sleep_duration of %d seconds", value );
+                  ESP_LOGD("stefan", "parsed sleep_duration of %u seconds", (unsigned) value );
                   if (value > 0) {
                     ESP_LOGD("stefan", "debug_gpio turned OFF");
                     id(debug_gpio).turn_off();
