@@ -92,11 +92,6 @@ esphome:
             // Drop the debug pin at the last moment before deep sleep (after ESPHome's shutdown
             // and teardown), so the scope pulse covers the whole wake.
             esp_deep_sleep_register_hook([]() { gpio_set_level(GPIO_NUM_10, 0); });
-            // Timestamp association vs. DHCP separately (ESPHome's wifi.connected means "has IP").
-            esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED,
-                [](void *, esp_event_base_t, int32_t, void *) { if (id(t_assoc) == 0) id(t_assoc) = millis(); }, nullptr);
-            esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
-                [](void *, esp_event_base_t, int32_t, void *) { if (id(t_gotip) == 0) id(t_gotip) = millis(); }, nullptr);
             if (logger::global_logger != nullptr) {
               logger::global_logger->add_log_callback(nullptr,
                   [](void *, uint8_t level, const char *tag, const char *message, size_t len) {
