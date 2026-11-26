@@ -103,7 +103,7 @@ mqtt:
           LightCall call = lightState->make_call();
 
           // Create a mutable JsonObject and copy the contents of 'x' (a JsonObjectConst)
-          JsonDocument doc;  // ArduinoJson 7 sizes itself; it takes no capacity argument
+          DynamicJsonDocument doc(1024);  // works on ArduinoJson 6 and 7 (deprecated, but still builds, on 7)
           JsonObject obj = doc.to<JsonObject>();
           obj.set(x);  // Set the content of the mutable JsonObject to the content of x
           //obj.remove("color_mode");  // <-- REMOVE THIS KEY
