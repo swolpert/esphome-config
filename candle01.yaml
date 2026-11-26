@@ -4,7 +4,7 @@ substitutions:
   dev_friendly_name: Candle 01     # Displayed in HA frontend
   dev_use_address: "${dev_name}.local"
   # dev_icon: mdi:candle
-  dev_static_ip: "192.168.1.137"
+  dev_static_ip: "192.168.2.137"
 
 # <<: !include .base.yaml
 # <<: !include .esp32_candlestick_dev_mqtt2.yaml
