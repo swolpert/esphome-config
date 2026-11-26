@@ -248,7 +248,7 @@ sensor:
 
 deep_sleep:
   id: deep_sleep1
-  run_duration: 5s
+  run_duration: 30s  # fallback only: consider_deep_sleep sleeps sooner once MQTT inputs arrive. WiFi+MQTT alone take ~5s, so 5s never let the retained messages arrive
   sleep_duration: 5s # something went wrong, so sleep a short amount of time to reset and try again
 
 interval:
