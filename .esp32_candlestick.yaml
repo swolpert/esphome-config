@@ -4,6 +4,9 @@ time:
   - platform: homeassistant
     id: homeassistant_time
 
+# Native Home Assistant API. time.homeassistant above requires it.
+api:
+
 esphome:
   name: ${dev_name}
   friendly_name: ${dev_friendly_name}
@@ -183,14 +186,12 @@ text_sensor:
     ip_address:
       name: "WiFi IP"
       icon: mdi:ip-network
-      update_interval: 60s
       disabled_by_default: true
       entity_category: diagnostic
       
     ssid:
       name: "WiFi SSID"
       icon: mdi:wifi
-      update_interval: 60s
       disabled_by_default: true
       entity_category: diagnostic
       
