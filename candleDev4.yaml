@@ -54,6 +54,14 @@ globals:
     type: uint32_t
     restore_value: no
     initial_value: '0'
+  - id: t_assoc   # WIFI_EVENT_STA_CONNECTED (association + WPA handshake done)
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: t_gotip   # IP_EVENT_STA_GOT_IP (DHCP done)
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
 
   # Boot log capture: log lines from before MQTT connects can't go out over MQTT, so they are
   # buffered here and published once to ${dev_name}/bootlog after the connection comes up.
@@ -82,6 +90,11 @@ esphome:
             // Drop the debug pin at the last moment before deep sleep (after ESPHome's shutdown
             // and teardown), so the scope pulse covers the whole wake.
             esp_deep_sleep_register_hook([]() { gpio_set_level(GPIO_NUM_10, 0); });
+            // Timestamp association vs. DHCP separately (ESPHome's wifi.connected means "has IP").
+            esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED,
+                [](void *, esp_event_base_t, int32_t, void *) { if (id(t_assoc) == 0) id(t_assoc) = millis(); }, nullptr);
+            esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                [](void *, esp_event_base_t, int32_t, void *) { if (id(t_gotip) == 0) id(t_gotip) = millis(); }, nullptr);
             if (logger::global_logger != nullptr) {
               logger::global_logger->add_log_callback(nullptr,
                   [](void *, uint8_t level, const char *tag, const char *message, size_t len) {
@@ -435,9 +448,9 @@ script:
                     esp_netif_ip_info_t ipi = {};
                     esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
                     if (sta != nullptr) esp_netif_get_ip_info(sta, &ipi);
-                    char wt[128];
-                    snprintf(wt, sizeof(wt), "wifi=%u mqtt=%u led=%u interval=%u sleep=%u ms since boot ip=" IPSTR,
-                             (unsigned) id(t_wifi), (unsigned) id(t_mqtt), (unsigned) id(t_led),
+                    char wt[160];
+                    snprintf(wt, sizeof(wt), "assoc=%u gotip=%u wifi=%u mqtt=%u led=%u interval=%u sleep=%u ms since boot ip=" IPSTR,
+                             (unsigned) id(t_assoc), (unsigned) id(t_gotip), (unsigned) id(t_wifi), (unsigned) id(t_mqtt), (unsigned) id(t_led),
                              (unsigned) id(t_interval), (unsigned) millis(), IP2STR(&ipi.ip));
                     ESP_LOGI("waketime", "%s", wt);
                     // Published directly (retained): log lines this close to sleep don't get out over MQTT.
