@@ -37,6 +37,24 @@ globals:
     restore_value: no
     initial_value: '"none"'
 
+  # Wake-time telemetry: millis() since boot at each milestone, logged once before sleeping.
+  - id: t_wifi
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: t_mqtt
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: t_led
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: t_interval
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
 esphome:
   name: ${dev_name}
   friendly_name: ${dev_friendly_name}
@@ -47,6 +65,16 @@ esphome:
         - output.turn_on: debug_gpio
         - logger.log: "debug_gpio turned ON"
         # - deep_sleep.prevent: deep_sleep1
+        - wait_until:
+            condition:
+              wifi.connected:
+            timeout: 30s
+        - lambda: 'id(t_wifi) = millis();'
+        - wait_until:
+            condition:
+              mqtt.connected:
+            timeout: 30s
+        - lambda: 'id(t_mqtt) = millis();'
 
     - priority: -101
       then:
@@ -93,6 +121,7 @@ mqtt:
   - topic: "candles/led"
     then:
       - lambda: |-
+          if (id(t_led) == 0) id(t_led) = millis();
           // Log the full incoming JSON message
           std::string json_string;
           serializeJson(x, json_string);  // Use 'x' as the JsonObject
@@ -145,6 +174,7 @@ mqtt:
   - topic: "candles/sleep_interval"
     then:
       - lambda: |-
+          if (id(t_interval) == 0) id(t_interval) = millis();
           id(sleep_interval) = x.c_str();  // Store the latest message in a global variable
           ESP_LOGD("mqtt", "Received candles/sleep_interval: %s", id(sleep_interval).c_str());  // Log the message
       - globals.set:
@@ -335,6 +365,9 @@ script:
 
                   ESP_LOGD("stefan", "parsed sleep_duration of %u seconds", (unsigned) value );
                   if (value > 0) {
+                    ESP_LOGI("waketime", "wifi=%u mqtt=%u led=%u interval=%u sleep=%u ms since boot",
+                             (unsigned) id(t_wifi), (unsigned) id(t_mqtt), (unsigned) id(t_led),
+                             (unsigned) id(t_interval), (unsigned) millis());
                     ESP_LOGD("stefan", "debug_gpio turned OFF");
                     id(debug_gpio).turn_off();
                     
