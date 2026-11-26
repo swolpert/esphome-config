@@ -79,6 +79,9 @@ esphome:
         - lambda: |-
             id(early_log).reserve(4096);
             id(main_task) = (void *) xTaskGetCurrentTaskHandle();
+            // Drop the debug pin at the last moment before deep sleep (after ESPHome's shutdown
+            // and teardown), so the scope pulse covers the whole wake.
+            esp_deep_sleep_register_hook([]() { gpio_set_level(GPIO_NUM_10, 0); });
             if (logger::global_logger != nullptr) {
               logger::global_logger->add_log_callback(nullptr,
                   [](void *, uint8_t level, const char *tag, const char *message, size_t len) {
@@ -141,6 +144,15 @@ esp32:
       # never updates, so they only take effect after a USB flash of firmware.factory.bin.
       CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP: y  # skip hashing the ~1.1MB app on wake (~200ms)
       CONFIG_BOOTLOADER_LOG_LEVEL_WARN: y               # no partition-table/segment prints (~100ms at 115200)
+      CONFIG_LWIP_DHCP_DOES_ARP_CHECK: n                # DHCP: skip the ARP conflict probe on each lease
+
+# Local copy of ESPHome 2026.9.1's mqtt component without the 100ms post-connect delay.
+# See components/README.md before upgrading ESPHome.
+external_components:
+  - source:
+      type: local
+      path: components
+    components: [mqtt]
 
 # binary_sensor:
 
@@ -419,16 +431,17 @@ script:
 
                   ESP_LOGD("stefan", "parsed sleep_duration of %u seconds", (unsigned) value );
                   if (value > 0) {
-                    char wt[96];
-                    snprintf(wt, sizeof(wt), "wifi=%u mqtt=%u led=%u interval=%u sleep=%u ms since boot",
+                    esp_netif_ip_info_t ipi = {};
+                    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+                    if (sta != nullptr) esp_netif_get_ip_info(sta, &ipi);
+                    char wt[128];
+                    snprintf(wt, sizeof(wt), "wifi=%u mqtt=%u led=%u interval=%u sleep=%u ms since boot ip=" IPSTR,
                              (unsigned) id(t_wifi), (unsigned) id(t_mqtt), (unsigned) id(t_led),
-                             (unsigned) id(t_interval), (unsigned) millis());
+                             (unsigned) id(t_interval), (unsigned) millis(), IP2STR(&ipi.ip));
                     ESP_LOGI("waketime", "%s", wt);
                     // Published directly (retained): log lines this close to sleep don't get out over MQTT.
                     mqtt::global_mqtt_client->publish("${dev_name}/waketime", wt, 0, true);
-                    ESP_LOGD("stefan", "debug_gpio turned OFF");
-                    id(debug_gpio).turn_off();
-                    
+                    // debug_gpio now drops in the esp_deep_sleep hook registered at boot.
                     esp_deep_sleep_disable_rom_logging();  // no ESP-ROM banner on next wake (~30ms at 115200)
                     id(deep_sleep1).allow_deep_sleep();
                     id(deep_sleep1).set_run_duration(0);
