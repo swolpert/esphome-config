@@ -84,6 +84,7 @@ esphome:
                   [](void *, uint8_t level, const char *tag, const char *message, size_t len) {
                     // Main loop task only: the MQTT backend logs from its own task.
                     if (id(early_log_done) || (void *) xTaskGetCurrentTaskHandle() != id(main_task)) return;
+                    if (level == ESPHOME_LOG_LEVEL_CONFIG) return;  // skip the config dump
                     if (id(early_log).size() + len + 12 > 4000) return;
                     char ts[12];
                     snprintf(ts, sizeof(ts), "%6u ", (unsigned) millis());
@@ -102,6 +103,11 @@ esphome:
               wifi.connected:
             timeout: 30s
         - lambda: 'id(t_wifi) = millis();'
+        - wait_until:
+            condition:
+              lambda: 'return mqtt::global_mqtt_client->is_in_loop_state();'
+            timeout: 5s
+        - mqtt.enable:
         - wait_until:
             condition:
               mqtt.connected:
@@ -140,6 +146,9 @@ mqtt:
   username: !secret mqtt_user
   password: !secret mqtt_password
   discovery: true
+  # Don't connect at setup: that happens ~150ms before WiFi is up, fails, and the client's
+  # 5s retry throttle then delays MQTT to ~5.1s after boot. on_boot enables MQTT once WiFi connects.
+  enable_on_boot: false
 
   # birth_message: # blank
   # will_message: # blank
