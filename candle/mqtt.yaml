@@ -1,0 +1,52 @@
+# MQTT: the broker and the candles/* inputs. HA publishes all inputs retained, so they arrive right
+# after connecting. Each handler is one call into candle/candle.h.
+#
+#   candles/led             light state (HA's JSON light); overrides the schedule      on_led
+#   candles/schedule        {"en","on","off"} rule, mirrored for offline on/off         on_schedule
+#   candles/sleep_interval  max time between check-ins, or "always on"                  on_sleep_interval
+#   candles/ota_request     one-shot OTA window from HA's "Candles OTA window" button   on_ota_request
+#   candles/debug_waketime  "on" = publish <name>/waketime each wake                    on_debug_waketime
+#
+# Published: <name>/wake (short health message, each wake), <name>/waketime (timing, debug only),
+# <name>/ota_ready (retained, while an OTA window is open).
+
+mqtt:
+  broker: 192.168.1.200
+  username: !secret mqtt_user
+  password: !secret mqtt_password
+  # HA discovery for the battery-voltage sensor is already retained on the broker (both lights are
+  # internal); set true for one wake if entities are added.
+  discovery: false
+  # Don't connect at setup: that's before WiFi is up, fails, and the client's 5 s retry throttle
+  # then delays MQTT to ~5 s after boot. wake.yaml enables MQTT once WiFi connects.
+  enable_on_boot: false
+  # Fresh session per wake. A persistent session piled up QoS 2 exchanges cut off by deep sleep until
+  # Mosquitto rejected every QoS 1/2 publish ("exceeded its receive-maximum quota").
+  clean_session: true
+  # No topic_prefix: it would make all candles share one topic.
+
+  on_json_message:
+    - topic: candles/led
+      then:
+        - lambda: 'candle::on_led(rgbw_led, x);'
+    - topic: candles/schedule
+      then:
+        - lambda: 'candle::on_schedule(x);'
+    - topic: candles/ota_request
+      then:
+        - lambda: 'candle::on_ota_request(x, id(ota_served_id), deep_sleep1);'
+
+  on_message:
+    - topic: candles/debug_waketime
+      then:
+        - lambda: 'candle::on_debug_waketime(x);'
+    - topic: candles/sleep_interval
+      then:
+        - lambda: 'candle::on_sleep_interval(x, deep_sleep1);'
+
+globals:
+  # Last OTA request served. In flash, so a request isn't served again after the OTA reboot.
+  - id: ota_served_id
+    type: uint32_t
+    restore_value: yes
+    initial_value: '0'

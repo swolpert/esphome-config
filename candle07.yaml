@@ -1,9 +1,17 @@
+# Battery candle 07. Everything shared is in candle/ (start with candle/candle.yaml).
 substitutions:
-  # https://esphome.io/guides/configuration-types.html#substitutions
-  dev_name: candle07                  # hostname & entity_id
-  dev_friendly_name: Candle 07     # Displayed in HA frontend
-  dev_use_address: "${dev_name}.local"
-  # dev_icon: mdi:candle
+  dev_name: candle07
+  dev_friendly_name: Candle 07
 
-<<: !include .base.yaml
-<<: !include .esp32_candlestick.yaml
+packages:
+  candle: !include candle/candle.yaml
+
+# Network: DHCP by default (a DHCP reservation on the router keeps the address fixed).
+# For a static IP instead, uncomment and use a free address outside the DHCP pool; it also saves the
+# ~1 s DHCP takes on each wake on the IoT VLAN.
+# wifi:
+#   manual_ip:
+#     static_ip: 192.168.2.xxx
+#     gateway: 192.168.2.1
+#     subnet: 255.255.255.0
+#     dns1: 192.168.2.1
