@@ -25,16 +25,15 @@
 #     - input_datetime.candles_off_time
 #     - sensor.candles_on_today
 #     - select.candles_sleep_interval_mqtt
-#     - input_button.candles_ota_window
+#     - input_boolean.candles_ota_window
 #     - input_boolean.candles_debug_telemetry
 
-input_button:
-  # Ask every candle to stay awake for one OTA window at its next WiFi wake (see candles_request_ota).
+input_boolean:
+  # On: every candle stays awake for one OTA window at its next WiFi wake (see candles_request_ota).
+  # Turns itself off after 13 h, when the request expires.
   candles_ota_window:
     name: Candles OTA window
     icon: mdi:cellphone-arrow-down
-
-input_boolean:
   candles_schedule:
     name: Candles schedule
     icon: mdi:calendar-clock
@@ -205,19 +204,54 @@ automation:
   # <name>/ota_ready. Updates queued in the ESPHome Device Builder (Install while a candle is offline)
   # upload automatically when the candle comes online. Requests expire after 13 h (> the 12 h cap).
   - id: candles_request_ota
-    alias: Candles - request OTA window
-    description: Publish a retained one-shot OTA window request for the battery candles.
+    alias: Candles - OTA window on/off
+    description: >-
+      On publishes a retained one-shot OTA window request for the battery candles; off clears it
+      (candles ignore an empty request). Switches itself off after 13 h, when the request expires.
+    mode: queued
     triggers:
       - trigger: state
-        entity_id: input_button.candles_ota_window
+        entity_id: input_boolean.candles_ota_window
+        to: "on"
+        id: "on"
+      - trigger: state
+        entity_id: input_boolean.candles_ota_window
+        to: "off"
+        id: "off"
+      - trigger: state
+        entity_id: input_boolean.candles_ota_window
+        to: "on"
+        for: "13:00:00"
+        id: expired
     actions:
-      - action: mqtt.publish
-        data:
-          topic: candles/ota_request
-          retain: true
-          payload: >-
-            {{ {'id': now().timestamp() | int, 'until': now().timestamp() | int + 13 * 3600,
-                'window_s': 900} | to_json }}
+      - choose:
+          - conditions:
+              - condition: trigger
+                id: "on"
+            sequence:
+              - action: mqtt.publish
+                data:
+                  topic: candles/ota_request
+                  retain: true
+                  payload: >-
+                    {{ {'id': now().timestamp() | int, 'until': now().timestamp() | int + 13 * 3600,
+                        'window_s': 900} | to_json }}
+          - conditions:
+              - condition: trigger
+                id: "off"
+            sequence:
+              - action: mqtt.publish
+                data:
+                  topic: candles/ota_request
+                  retain: true
+                  payload: ""
+          - conditions:
+              - condition: trigger
+                id: expired
+            sequence:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: input_boolean.candles_ota_window
 
   # Tell the user when a candle is awake for its OTA window (and clear it when the window ends).
   - id: candles_ota_ready_notify

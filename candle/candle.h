@@ -433,7 +433,11 @@ static void on_time_sync() {
 static void on_led(LightState *ls, JsonObjectConst x) {
   if (wake.t_led == 0) wake.t_led = millis();
   auto call = ls->make_call();
-  DynamicJsonDocument doc(1024);  // builds on ArduinoJson 6 and 7 (deprecated on 7)
+#if ARDUINOJSON_VERSION_MAJOR >= 7
+  JsonDocument doc;
+#else
+  DynamicJsonDocument doc(1024);
+#endif
   JsonObject obj = doc.to<JsonObject>();
   obj.set(x);
   esphome::light::LightJSONSchema::parse_json(*ls, call, obj);
