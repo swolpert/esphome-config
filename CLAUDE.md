@@ -28,7 +28,7 @@ Put per-device values in the device file's substitutions, not in shared layers. 
 
 ## Candle hardware
 
-DFRobot Beetle ESP32-C3 (Arduino framework). SK6812 RGBW LED on GPIO0 (`neopixelbus`, GRBW). Blue status LED on GPIO8 (LEDC PWM, inverted; strapping pin). Battery ADC on GPIO3. `debug_gpio` on GPIO10 goes high at boot so wake time can be measured on a scope. Some boards have a DS3231 RTC on I2C (SDA GPIO4 / SCL GPIO5, address 0x68).
+DFRobot Beetle ESP32-C3 (Arduino framework). SK6812 RGBW LED on GPIO0 in candle01 / GPIO21 in candle02–10 (`esp32_rmt_led_strip`, `channel_colors: GRBW`; the old `candleDevN` files still use `neopixelbus`). Blue status LED on GPIO8 (LEDC PWM, inverted; strapping pin). Battery ADC on GPIO3. `debug_gpio` on GPIO10 goes high at boot so wake time can be measured on a scope. Some boards have a DS3231 RTC on I2C (SDA GPIO4 / SCL GPIO5, address 0x68).
 
 ## candleDev versions (battery candles, MQTT-controlled)
 
@@ -49,7 +49,7 @@ MQTT topics under `candles/` are shared by all candles; per-device topics use `$
 
 JSON in lambdas: use `DynamicJsonDocument doc(1024);` and `obj["k"].is<T>()`. They compile on both ArduinoJson 6 and 7 (DynamicJsonDocument is deprecated on 7 but builds), so configs work on the user's pinned ESPHome and on newer ones. `JsonDocument doc;` is 7-only; `containsKey` is deprecated.
 
-Deprecations due in ESPHome 2027.1: `web_server: version: 1` (used in the base layers), and `neopixelbus` on ESP32, which should move to `esp32_rmt_led_strip`.
+Deprecations: `neopixelbus` on ESP32 (removal targeted for 2027.1) was replaced by `esp32_rmt_led_strip` in `candleDev10.yaml` and `.esp32_candlestick.yaml` on 2026-11-26; use `channel_colors`, since `rgb_order`/`is_rgbw` are deprecated too (removal 2027.3). `baseCandle.yaml` and `.base.yaml` use `web_server: version: 2` (2026-11-26; version 1 is removed in 2027.1). With v2, `den1` (ESP8266 `esp01_1m`) is 435 KB, still under the ~510 KB OTA limit. candle02–10 (`.esp32_candlestick.yaml`) have never been set up in HA (only candle01 is in the device registry); they're configs for future always-on candles.
 
 ## Wake time (battery candles, candleDev4 and 10)
 

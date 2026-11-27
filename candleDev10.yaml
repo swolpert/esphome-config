@@ -372,12 +372,13 @@ light:
             id: blue_led_light
             effect: "Custom Pulse"
 
-  - platform: neopixelbus
+  # esp32_rmt_led_strip replaces neopixelbus (deprecated on ESP32, removal targeted for 2027.1).
+  - platform: esp32_rmt_led_strip
     id: rgbw_led
     name: "Candle"
     icon: mdi:candle
-    type: GRBW
-    variant: SK6812
+    chipset: SK6812
+    channel_colors: GRBW
     pin: GPIO0
     num_leds: 1
     default_transition_length: 0s
