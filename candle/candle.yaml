@@ -119,7 +119,9 @@ light:
 output:
   - platform: ledc
     id: blue_led_pwm
-    pin: GPIO8  # strapping pin
+    pin:
+      number: GPIO8  # strapping pin; fine for an output that's only driven after boot
+      ignore_strapping_warning: true
     inverted: true
   - platform: gpio
     id: debug_gpio
