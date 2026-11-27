@@ -246,6 +246,10 @@ class MQTTClientComponent final : public Component {
   void register_mqtt_component(MQTTComponent *component);
 
   bool is_connected();
+#if defined(USE_ESP32)
+  /// LOCAL PATCH (esphome-config): bytes of QoS 1/2 publishes still waiting for the broker's ack.
+  int outbox_size() { return this->mqtt_backend_.outbox_size(); }
+#endif
   void set_enable_on_boot(bool enable_on_boot) { this->enable_on_boot_ = enable_on_boot; }
   void enable();
   void disable();
