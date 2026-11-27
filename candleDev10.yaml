@@ -63,6 +63,17 @@ globals:
     restore_value: no
     initial_value: '0'
 
+  # OTA window (see candles/ota_request). ota_served_id is kept in flash so a request is served
+  # once per candle, including across the reboot that follows the OTA (RTC memory doesn't survive it).
+  - id: ota_served_id
+    type: uint32_t
+    restore_value: yes
+    initial_value: '0'
+  - id: ota_wait_until
+    type: uint32_t   # millis() when the OTA window ends; 0 = not waiting
+    restore_value: no
+    initial_value: '0'
+
   # Wake-time telemetry: millis() since boot at each milestone.
   - id: t_wifi
     type: uint32_t
@@ -279,6 +290,39 @@ mqtt:
                      candle::rtc.on.kind, candle::rtc.on.minutes, candle::rtc.off.kind, candle::rtc.off.minutes);
             id(schedule_received) = true;
 
+    # OTA window: {"id":<unique>,"until":<epoch>,"window_s":900}, retained, from HA's "Candles OTA
+    # window" button. Each candle serves a request once: it stays awake up to window_s and publishes
+    # its IP on ${dev_name}/ota_ready (HA turns that into a notification). Then "Install ->
+    # Wirelessly" in the ESPHome dashboard finds it via MQTT IP lookup (esphome/ping, discover_ip).
+    # Unlike "always on", the candle goes back to normal sleeps after the window either way.
+    - topic: "candles/ota_request"
+      then:
+        - lambda: |-
+            uint32_t req = x["id"] | 0u;
+            int64_t until = x["until"] | (int64_t) 0;
+            uint32_t window_s = x["window_s"] | 600u;
+            if (window_s < 60) window_s = 60;
+            if (window_s > 1800) window_s = 1800;
+            time_t now = ::time(nullptr);
+            if (req == 0 || req == id(ota_served_id)) return;
+            if (candle::time_valid(now) && until != 0 && now > until) {
+              ESP_LOGI("candle", "ota_request %u expired", (unsigned) req);
+              return;
+            }
+            id(ota_served_id) = req;  // once per request, even if no upload comes
+            global_preferences->sync();
+            id(ota_wait_until) = millis() + window_s * 1000;
+            if (id(ota_wait_until) == 0) id(ota_wait_until) = 1;
+            id(deep_sleep1).prevent_deep_sleep();
+            esp_netif_ip_info_t ipi = {};
+            esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+            if (sta != nullptr) esp_netif_get_ip_info(sta, &ipi);
+            char msg[96];
+            snprintf(msg, sizeof(msg), "{\"ip\":\"" IPSTR "\",\"id\":%u,\"window_s\":%u}", IP2STR(&ipi.ip),
+                     (unsigned) req, (unsigned) window_s);
+            mqtt::global_mqtt_client->publish(std::string("${dev_name}/ota_ready"), std::string(msg), (uint8_t) 0, true);
+            ESP_LOGI("candle", "OTA window open for %us: %s", (unsigned) window_s, msg);
+
   on_message:
     - topic: "candles/sleep_interval"
       then:
@@ -422,6 +466,13 @@ script:
           condition:
             lambda: |-
               if (strncmp(id(sleep_interval).c_str(), "always on", 9) == 0) return false;
+              if (id(ota_wait_until) != 0) {
+                if ((int32_t) (millis() - id(ota_wait_until)) < 0) return false;  // OTA window open
+                // Window over without an upload: clear our ota_ready and sleep normally.
+                id(ota_wait_until) = 0;
+                mqtt::global_mqtt_client->publish(std::string("${dev_name}/ota_ready"), std::string(""), (uint8_t) 0, true);
+                ESP_LOGI("candle", "OTA window closed without an upload");
+              }
               uint32_t since_mqtt = millis() - id(t_mqtt);
               return id(latest_light_state) != "none" && id(mqtt_done_sleep_interval) && id(adc_done_switch) &&
                      // SNTP is best effort, but wait longer when the clock has never been set.
@@ -483,6 +534,10 @@ script:
       - lambda: |-
           if (id(sleeping)) return;
           id(sleeping) = true;
+          // First sleep after a reboot (e.g. the one that follows an OTA): clear a leftover ota_ready.
+          if (esp_reset_reason() != ESP_RST_DEEPSLEEP && mqtt::global_mqtt_client != nullptr &&
+              mqtt::global_mqtt_client->is_connected())
+            mqtt::global_mqtt_client->publish(std::string("${dev_name}/ota_ready"), std::string(""), (uint8_t) 0, true);
           time_t now = ::time(nullptr);
           int64_t next_ev = 0;
           uint8_t this_kind = candle::boot_kind;

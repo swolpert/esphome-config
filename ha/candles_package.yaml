@@ -25,6 +25,13 @@
 #     - input_datetime.candles_off_time
 #     - sensor.candles_on_today
 #     - select.candles_sleep_interval_mqtt
+#     - input_button.candles_ota_window
+
+input_button:
+  # Ask every candle to stay awake for one OTA window at its next WiFi wake (see candles_request_ota).
+  candles_ota_window:
+    name: Candles OTA window
+    icon: mdi:cellphone-arrow-down
 
 input_boolean:
   candles_schedule:
@@ -171,3 +178,51 @@ automation:
           - action: light.turn_off
             target:
               entity_id: light.candles_rgb_mqtt
+
+  # OTA window for the battery candles (candleDev10+). Each candle serves a request id once: at its
+  # next WiFi wake (up to the sleep interval later) it stays awake for window_s and publishes its IP on
+  # <name>/ota_ready. Then use "Install -> Wirelessly" in the ESPHome dashboard (it finds the candle
+  # through MQTT IP lookup). Requests expire after 13 h (> the 12 h cap).
+  - id: candles_request_ota
+    alias: Candles - request OTA window
+    description: Publish a retained one-shot OTA window request for the battery candles.
+    triggers:
+      - trigger: state
+        entity_id: input_button.candles_ota_window
+    actions:
+      - action: mqtt.publish
+        data:
+          topic: candles/ota_request
+          retain: true
+          payload: >-
+            {{ {'id': now().timestamp() | int, 'until': now().timestamp() | int + 13 * 3600,
+                'window_s': 900} | to_json }}
+
+  # Tell the user when a candle is awake for its OTA window (and clear it when the window ends).
+  - id: candles_ota_ready_notify
+    alias: Candles - OTA window open
+    description: Notify when a battery candle is awake for an OTA (<name>/ota_ready).
+    mode: parallel
+    triggers:
+      - trigger: mqtt
+        topic: "+/ota_ready"
+    actions:
+      - variables:
+          dev: "{{ trigger.topic.split('/')[0] }}"
+      - if:
+          - condition: template
+            value_template: "{{ trigger.payload | length > 0 }}"
+        then:
+          - action: persistent_notification.create
+            data:
+              notification_id: "candle_ota_{{ dev }}"
+              title: "{{ dev }} is awake for an update"
+              message: >-
+                {% set p = trigger.payload_json %}
+                {{ dev }} ({{ p.ip }}) stays awake for {{ (p.window_s | int(900)) // 60 }} minutes
+                (until {{ (now() + timedelta(seconds=p.window_s | int(900))).strftime('%H:%M') }}).
+                In the ESPHome dashboard, open {{ dev }} and choose Install, then Wirelessly.
+        else:
+          - action: persistent_notification.dismiss
+            data:
+              notification_id: "candle_ota_{{ dev }}"
