@@ -9,4 +9,4 @@ substitutions:
 # <<: !include .base.yaml
 # <<: !include .esp32_candlestick_dev_mqtt2.yaml
 <<: !include baseCandle.yaml
-<<: !include candleDev4.yaml
+<<: !include candleDev10.yaml

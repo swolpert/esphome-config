@@ -1,0 +1,173 @@
+# Home Assistant package: candle on/off schedule.
+#
+# Installed on HA as /config/packages/candles.yaml (configuration.yaml: homeassistant: packages:
+# !include_dir_named packages). This copy is kept in the esphome-config repo for reference.
+#
+# What it does:
+#  - Dashboard helpers pick the on time (fixed time, or sunset/sunrise +/- an offset) and the off time.
+#  - The rule is published retained to candles/schedule, e.g. {"en":1,"on":"sunset-30","off":"22:00"}.
+#    Battery candles (candleDev10.yaml) mirror it and switch on/off by themselves when HA/MQTT is
+#    unreachable, and plan their sleeps around it.
+#  - At the on/off times HA switches light.candles_rgb_mqtt, which publishes the retained candles/led.
+#    HA always decides: candles apply candles/led on every wake that reaches MQTT.
+#
+# Replaces the Simple Scheduler "Candles" schedule and the Node-RED "SimpleSchedule to MQTT" flow.
+#
+# Dashboard card:
+#   type: entities
+#   title: Candles
+#   entities:
+#     - light.candles_rgb_mqtt
+#     - input_boolean.candles_schedule
+#     - input_select.candles_on_mode
+#     - input_number.candles_on_offset
+#     - input_datetime.candles_on_time
+#     - input_datetime.candles_off_time
+#     - sensor.candles_on_today
+#     - select.candles_sleep_interval_mqtt
+
+input_boolean:
+  candles_schedule:
+    name: Candles schedule
+    icon: mdi:calendar-clock
+
+input_select:
+  candles_on_mode:
+    name: Candles on at
+    icon: mdi:weather-sunset-down
+    options:
+      - Sunset
+      - Fixed time
+      - Sunrise
+
+input_number:
+  candles_on_offset:
+    name: Candles on offset (sunset/sunrise)
+    icon: mdi:timer-plus-outline
+    min: -180
+    max: 180
+    step: 15
+    unit_of_measurement: min
+    mode: slider
+
+input_datetime:
+  candles_on_time:
+    name: Candles on time (fixed)
+    has_date: false
+    has_time: true
+  candles_off_time:
+    name: Candles off time
+    has_date: false
+    has_time: true
+
+template:
+  # Today's sunset/sunrise. sun.sun only has the *next* ones, which move to tomorrow once today's has
+  # passed, so capture them just after midnight (when next == today). After a restart later in the
+  # day, next - 1 day is used, which is off by at most a couple of minutes.
+  - triggers:
+      - trigger: time
+        at: "00:00:30"
+      - trigger: homeassistant
+        event: start
+      - trigger: event
+        event_type: event_template_reloaded
+    sensor:
+      - name: Candles sun today
+        unique_id: candles_sun_today
+        icon: mdi:weather-sunset
+        state: "{{ now().date().isoformat() }}"
+        attributes:
+          sunset: >-
+            {% set s = state_attr('sun.sun', 'next_setting') | as_datetime | as_local %}
+            {{ (s if s.date() == now().date() else s - timedelta(days=1)).isoformat() }}
+          sunrise: >-
+            {% set s = state_attr('sun.sun', 'next_rising') | as_datetime | as_local %}
+            {{ (s if s.date() == now().date() else s - timedelta(days=1)).isoformat() }}
+
+  - sensor:
+      # The rule the candles mirror (published retained to candles/schedule).
+      - name: Candles schedule rule
+        unique_id: candles_schedule_rule
+        icon: mdi:code-json
+        state: >-
+          {% set mode = states('input_select.candles_on_mode') %}
+          {% set off = states('input_number.candles_on_offset') | float(0) | int %}
+          {% if mode == 'Fixed time' %}
+            {% set on = states('input_datetime.candles_on_time')[:5] %}
+          {% else %}
+            {% set on = ('sunset' if mode == 'Sunset' else 'sunrise') ~ (('+' if off > 0 else '') ~ off if off != 0 else '') %}
+          {% endif %}
+          {{ {'en': 1 if is_state('input_boolean.candles_schedule', 'on') else 0,
+              'on': on,
+              'off': states('input_datetime.candles_off_time')[:5]} | to_json }}
+
+      # Today's on time (may be in the past); the switch automation fires at it.
+      - name: Candles on today
+        unique_id: candles_on_today
+        icon: mdi:candle
+        device_class: timestamp
+        state: >-
+          {% set mode = states('input_select.candles_on_mode') %}
+          {% set off = states('input_number.candles_on_offset') | float(0) | int %}
+          {% if mode == 'Fixed time' %}
+            {{ today_at(states('input_datetime.candles_on_time')).isoformat() }}
+          {% else %}
+            {% set base = state_attr('sensor.candles_sun_today', 'sunset' if mode == 'Sunset' else 'sunrise') %}
+            {% if base %}
+              {{ ((base | as_datetime) + timedelta(minutes=off)).isoformat() }}
+            {% else %}
+              unknown
+            {% endif %}
+          {% endif %}
+        availability: >-
+          {{ states('input_select.candles_on_mode') == 'Fixed time'
+             or state_attr('sensor.candles_sun_today', 'sunset') is not none }}
+
+automation:
+  - id: candles_schedule_publish
+    alias: Candles - publish schedule
+    description: Publish the schedule rule retained to candles/schedule for the battery candles.
+    mode: queued
+    triggers:
+      - trigger: state
+        entity_id: sensor.candles_schedule_rule
+      - trigger: homeassistant
+        event: start
+    conditions:
+      - condition: template
+        value_template: "{{ states('sensor.candles_schedule_rule') not in ['unknown', 'unavailable', ''] }}"
+    actions:
+      - action: mqtt.publish
+        data:
+          topic: candles/schedule
+          payload: "{{ states('sensor.candles_schedule_rule') }}"
+          retain: true
+
+  - id: candles_schedule_switch
+    alias: Candles - scheduled on/off
+    description: Switch the candles at the scheduled times (publishes the retained candles/led).
+    mode: queued
+    triggers:
+      - trigger: time
+        at: sensor.candles_on_today
+        id: "on"
+      - trigger: time
+        at: input_datetime.candles_off_time
+        id: "off"
+    conditions:
+      - condition: state
+        entity_id: input_boolean.candles_schedule
+        state: "on"
+    actions:
+      - choose:
+          - conditions:
+              - condition: trigger
+                id: "on"
+            sequence:
+              - action: light.turn_on
+                target:
+                  entity_id: light.candles_rgb_mqtt
+        default:
+          - action: light.turn_off
+            target:
+              entity_id: light.candles_rgb_mqtt

@@ -1,0 +1,515 @@
+---
+# candleDev10: candleDev4 plus a mirrored on/off schedule and schedule-aware sleeps.
+#
+# HA publishes a retained rule on candles/schedule ({"en":1,"on":"sunset-30","off":"22:00"}) and still
+# decides the light through the retained candles/led, which overrides the schedule on every wake that
+# reaches MQTT. The candle keeps the rule in RTC memory and switches on/off at the scheduled times by
+# itself (see candle_schedule.h), so it works without HA, and sleeps up to candles/sleep_interval
+# (the max time between check-ins) otherwise.
+#
+# Accurate wakes without an external RTC: a long sleep on the ESP32-C3 timer aims a few % early
+# (PRE_EVENT wake: WiFi + SNTP resync), then a short precise sleep lands on the event (EVENT wake:
+# no WiFi, just set the LED and sleep again).
+
+globals:
+  - id: adc_done_switch
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: mqtt_done_sleep_interval
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: schedule_received
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: sntp_done
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: latest_light_state
+    type: std::string
+    restore_value: no
+    initial_value: '"none"'
+  - id: sleep_interval
+    type: std::string
+    restore_value: no
+    initial_value: '"none"'
+  - id: sleeping
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  # Clock drift measured at SNTP sync: system time just before sync vs. SNTP (ms, + = clock was behind).
+  - id: sys_before_ms
+    type: int64_t
+    restore_value: no
+    initial_value: '0'
+  - id: millis_before
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: drift_ms
+    type: int32_t
+    restore_value: no
+    initial_value: '0'
+  - id: event_early_s
+    type: int32_t
+    restore_value: no
+    initial_value: '0'
+  - id: drift_ppm
+    type: int32_t
+    restore_value: no
+    initial_value: '0'
+
+  # Wake-time telemetry: millis() since boot at each milestone.
+  - id: t_wifi
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: t_sntp
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: t_mqtt
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: t_led
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: t_interval
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: t_assoc   # WIFI_EVENT_STA_CONNECTED (association + WPA handshake done)
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: t_gotip   # IP_EVENT_STA_GOT_IP (DHCP done)
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+  # Boot log capture: log lines from before MQTT connects can't go out over MQTT, so they are
+  # buffered here and published once to ${dev_name}/bootlog after the connection comes up.
+  - id: early_log
+    type: std::string
+    restore_value: no
+  - id: early_log_done
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: main_task
+    type: void *
+    restore_value: no
+    initial_value: 'nullptr'
+
+esphome:
+  name: ${dev_name}
+  friendly_name: ${dev_friendly_name}
+  includes:
+    - candle_includes.h
+    - candle_schedule.h
+
+  on_boot:
+    - priority: 800  # early, before WiFi (250) and MQTT (200) set up
+      then:
+        - lambda: |-
+            candle::decide_boot_kind();
+            if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) candle::correct_clock_after_sleep();
+            id(early_log).reserve(4096);
+            id(main_task) = (void *) xTaskGetCurrentTaskHandle();
+            // Drop the debug pin at the last moment before deep sleep (after ESPHome's shutdown
+            // and teardown), so the scope pulse covers the whole wake.
+            esp_deep_sleep_register_hook([]() { gpio_set_level(GPIO_NUM_10, 0); });
+            if (logger::global_logger != nullptr) {
+              logger::global_logger->add_log_callback(nullptr,
+                  [](void *, uint8_t level, const char *tag, const char *message, size_t len) {
+                    // Main loop task only: the MQTT backend logs from its own task.
+                    if (id(early_log_done) || (void *) xTaskGetCurrentTaskHandle() != id(main_task)) return;
+                    if (level == ESPHOME_LOG_LEVEL_CONFIG) return;  // skip the config dump
+                    if (id(early_log).size() + len + 12 > 4000) return;
+                    char ts[12];
+                    snprintf(ts, sizeof(ts), "%6u ", (unsigned) millis());
+                    id(early_log).append(ts);
+                    id(early_log).append(message, len);
+                    id(early_log).push_back('\n');
+                  });
+            }
+            ESP_LOGI("candle", "wake kind: %s", candle::WAKE_NAMES[candle::boot_kind]);
+    - priority: 240  # after WiFi setup (250) created the default event loop, before association
+      then:
+        - lambda: |-
+            // Timestamp association vs. DHCP separately (ESPHome's wifi.connected means "has IP").
+            esp_err_t e1 = esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED,
+                [](void *, esp_event_base_t, int32_t, void *) { if (id(t_assoc) == 0) id(t_assoc) = millis(); }, nullptr);
+            esp_err_t e2 = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                [](void *, esp_event_base_t, int32_t, void *) { if (id(t_gotip) == 0) id(t_gotip) = millis(); }, nullptr);
+            if (e1 != ESP_OK || e2 != ESP_OK) ESP_LOGW("waketime", "event hook register failed: %d %d", e1, e2);
+    - priority: 600  # after the light (HARDWARE) is set up
+      then:
+        - output.turn_on: debug_gpio
+        - if:
+            condition:
+              lambda: 'return candle::boot_kind == candle::WAKE_EVENT;'
+            then:
+              - script.execute: event_wake
+            else:
+              - wait_until:
+                  condition:
+                    wifi.connected:
+                  timeout: 10s
+              - if:
+                  condition:
+                    not:
+                      wifi.connected:
+                  then:
+                    - script.execute: offline_sleep
+                  else:
+                    - lambda: |-
+                        id(t_wifi) = millis();
+                        // Snapshot the free-running clock so the SNTP sync can measure its drift.
+                        struct timeval tv;
+                        gettimeofday(&tv, nullptr);
+                        id(sys_before_ms) = (int64_t) tv.tv_sec * 1000 + tv.tv_usec / 1000;
+                        id(millis_before) = millis();
+                        // ESPHome starts SNTP at setup, before WiFi; that first request fails and lwIP's
+                        // backoff delays the next one ~30 s. Ask again now that there's a route.
+                        esp_sntp_restart();
+                    - wait_until:
+                        condition:
+                          lambda: 'return mqtt::global_mqtt_client->is_in_loop_state();'
+                        timeout: 5s
+                    - mqtt.enable:
+                    - wait_until:
+                        condition:
+                          mqtt.connected:
+                        timeout: 10s
+                    - if:
+                        condition:
+                          not:
+                            mqtt.connected:
+                        then:
+                          - script.execute: offline_sleep
+                        else:
+                          - lambda: |-
+                              id(t_mqtt) = millis();
+                              id(early_log_done) = true;
+                              mqtt::global_mqtt_client->publish("${dev_name}/bootlog", id(early_log));
+                              id(early_log).clear();
+                              id(early_log).shrink_to_fit();
+
+    - priority: -101
+      then:
+        - component.update: adc_batt_voltage
+
+esp32:
+  board: dfrobot_beetle_esp32c3
+  variant: esp32c3
+  framework:
+    type: arduino
+    sdkconfig_options:
+      # Wake-time savings in the 2nd-stage bootloader. These live in the bootloader, which OTA
+      # never updates, so they only take effect after a USB flash of firmware.factory.bin.
+      CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP: y  # skip hashing the ~1.1MB app on wake (~200ms)
+      CONFIG_BOOTLOADER_LOG_LEVEL_WARN: y               # no partition-table/segment prints (~100ms at 115200)
+      CONFIG_LWIP_DHCP_DOES_ARP_CHECK: n                # DHCP: skip the ARP conflict probe on each lease
+      CONFIG_LWIP_DHCP_RESTORE_LAST_IP: y               # DHCP: re-request the last IP (no DISCOVER); NVS write only when the IP changes
+      CONFIG_LWIP_SNTP_STARTUP_DELAY: n                 # SNTP: send the first request right away, not after a random delay
+
+# Local copy of ESPHome 2026.9.1's mqtt component without the 100ms post-connect delay.
+# See components/README.md before upgrading ESPHome.
+external_components:
+  - source:
+      type: local
+      path: components
+    components: [mqtt]
+
+mqtt:
+  broker: 192.168.1.200
+  username: !secret mqtt_user
+  password: !secret mqtt_password
+  # HA's discovery config for this candle (battery voltage; both lights are internal) is already
+  # retained on the broker, so skip republishing it and the discovery subscriptions on every wake.
+  # Set to true for one wake if entities are added.
+  discovery: false
+  # Don't connect at setup: that happens ~150ms before WiFi is up, fails, and the client's
+  # 5s retry throttle then delays MQTT to ~5.1s after boot. on_boot enables MQTT once WiFi connects.
+  enable_on_boot: false
+  # No topic_prefix: it would make all candles share one topic.
+
+  on_json_message:
+    # HA decides: the retained light state overrides the schedule on every wake that reaches MQTT.
+    - topic: "candles/led"
+      then:
+        - lambda: |-
+            if (id(t_led) == 0) id(t_led) = millis();
+            std::string json_string;
+            serializeJson(x, json_string);
+            ESP_LOGD("mqtt", "candles/led: %s", json_string.c_str());
+
+            LightState *lightState = rgbw_led;
+            LightCall call = lightState->make_call();
+            DynamicJsonDocument doc(1024);  // works on ArduinoJson 6 and 7 (deprecated, but still builds, on 7)
+            JsonObject obj = doc.to<JsonObject>();
+            obj.set(x);
+            LightJSONSchema::parse_json(*lightState, call, obj);
+            call.perform();
+
+            id(latest_light_state) = json_string;
+
+    # The schedule rule, mirrored into RTC memory for offline on/off.
+    - topic: "candles/schedule"
+      then:
+        - lambda: |-
+            candle::Rule on{}, off{};
+            bool ok = candle::parse_rule(x["on"] | "", on) && candle::parse_rule(x["off"] | "", off);
+            int en = x["en"] | 1;
+            if (ok) {
+              candle::rtc.on = on;
+              candle::rtc.off = off;
+              candle::rtc.en = en ? 1 : 0;
+            } else {
+              ESP_LOGW("candle", "candles/schedule: can't parse on/off, keeping the previous rule");
+            }
+            ESP_LOGI("candle", "schedule en=%d on=%d/%d off=%d/%d", candle::rtc.en,
+                     candle::rtc.on.kind, candle::rtc.on.minutes, candle::rtc.off.kind, candle::rtc.off.minutes);
+            id(schedule_received) = true;
+
+  on_message:
+    - topic: "candles/sleep_interval"
+      then:
+        - lambda: |-
+            if (id(t_interval) == 0) id(t_interval) = millis();
+            id(sleep_interval) = x;
+            ESP_LOGD("mqtt", "candles/sleep_interval: %s", id(sleep_interval).c_str());
+            // "always on" (for OTA) takes effect immediately, even if other inputs haven't arrived.
+            // It overrides the 30s run_duration fallback until a normal interval is received.
+            if (strncmp(id(sleep_interval).c_str(), "always on", 9) == 0) {
+              id(deep_sleep1).prevent_deep_sleep();
+              ESP_LOGI("candle", "sleep_interval 'always on': deep sleep prevented (30s fallback ignored)");
+            } else {
+              int64_t cap = candle::parse_interval_s(id(sleep_interval).c_str());
+              if (cap > 0) candle::rtc.cap_s = cap;
+            }
+            id(mqtt_done_sleep_interval) = true;
+
+light:
+  - platform: monochromatic
+    output: blue_led_pwm
+    id: blue_led_light
+    name: "Blue LED"
+    restore_mode: ALWAYS_ON
+    internal: true
+    disabled_by_default: true
+    effects:
+      - pulse:
+      - pulse:
+          name: "Custom Pulse"
+          transition_length: 1.5s
+          update_interval: 1.5s
+          min_brightness: 10%
+          max_brightness: 85%
+    on_turn_on:
+      then:
+        - light.turn_on:
+            id: blue_led_light
+            effect: "Custom Pulse"
+
+  - platform: neopixelbus
+    id: rgbw_led
+    name: "Candle"
+    icon: mdi:candle
+    type: GRBW
+    variant: SK6812
+    pin: GPIO0
+    num_leds: 1
+    default_transition_length: 0s
+    internal: true
+    # Color/brightness/effect are saved at shutdown and restored on each wake, so the schedule
+    # only has to switch the state.
+    restore_mode: RESTORE_DEFAULT_OFF
+    effects:
+      - flicker:
+      - flicker:
+          name: "Custom Flicker"
+          alpha: 95%
+          intensity: 5%
+
+# for PWM status led:
+output:
+  - platform: ledc
+    id: blue_led_pwm
+    pin: GPIO8
+    inverted: true
+    min_power: 0%
+    max_power: 100%
+
+  - platform: gpio
+    pin: GPIO10
+    id: debug_gpio
+
+sensor:
+  - platform: adc
+    pin: GPIO3
+    id: adc_batt_voltage
+    name: "Battery Voltage"
+    update_interval: 60s
+    attenuation: 12db
+    entity_category: diagnostic
+    on_value:
+      then:
+        - globals.set:
+            id: adc_done_switch
+            value: 'true'
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: America/New_York
+    # IPs, not names: the IoT VLAN firewall only allows NTP to these two (and it skips DNS).
+    servers:
+      - 162.159.200.123  # Cloudflare (anycast, ~7 ms)
+      - 216.239.35.0     # time.google.com
+      - 129.6.15.28      # NIST Gaithersburg
+    on_time_sync:
+      then:
+        - lambda: |-
+            // Only a real sync counts: with the clock still valid after deep sleep, ESPHome's SNTP
+            // fires on_time_sync from its first loop(), before WiFi. millis_before is set once WiFi
+            // is up, right before esp_sntp_restart().
+            if (id(sntp_done) || id(millis_before) == 0) return;
+            struct timeval tv;
+            gettimeofday(&tv, nullptr);
+            int64_t synced_ms = (int64_t) tv.tv_sec * 1000 + tv.tv_usec / 1000;
+            if (id(millis_before) != 0 && candle::time_valid(id(sys_before_ms) / 1000)) {
+              int64_t expected = id(sys_before_ms) + (int64_t) (millis() - id(millis_before));
+              id(drift_ms) = (int32_t) (synced_ms - expected);
+              if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) id(drift_ppm) = candle::calibrate(id(drift_ms));
+            }
+            id(t_sntp) = millis();
+            id(sntp_done) = true;
+
+sun:
+  id: sun1
+  time_id: sntp_time
+  latitude: !secret candle_latitude
+  longitude: !secret candle_longitude
+
+deep_sleep:
+  id: deep_sleep1
+  run_duration: 30s  # fallback only: a normal wake sleeps as soon as its inputs arrive
+  sleep_duration: 5s # something went wrong, so sleep a short amount of time to reset and try again
+
+interval:
+  - interval: 200ms
+    then:
+      - if:
+          condition:
+            lambda: 'return candle::boot_kind != candle::WAKE_EVENT && !id(sleeping) && id(t_mqtt) != 0;'
+          then:
+            - script.execute: consider_deep_sleep
+
+script:
+  # Normal wake with MQTT: sleep once the retained inputs, the ADC sample and the clock are in.
+  - id: consider_deep_sleep
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: |-
+              if (strncmp(id(sleep_interval).c_str(), "always on", 9) == 0) return false;
+              uint32_t since_mqtt = millis() - id(t_mqtt);
+              return id(latest_light_state) != "none" && id(mqtt_done_sleep_interval) && id(adc_done_switch) &&
+                     // SNTP is best effort, but wait longer when the clock has never been set.
+                     (id(sntp_done) || since_mqtt > (candle::time_valid(::time(nullptr)) ? 3000u : 10000u)) &&
+                     (id(schedule_received) || since_mqtt > 1000);    // retained, so it comes with the others
+          then:
+            - script.execute: go_to_sleep
+
+  # WiFi or MQTT didn't come up: follow the mirrored schedule, then sleep.
+  - id: offline_sleep
+    mode: single
+    then:
+      - lambda: |-
+          time_t now = ::time(nullptr);
+          if (candle::schedule_known() && candle::time_valid(now)) {
+            bool on = candle::scheduled_state(now, id(sun1));
+            ESP_LOGW("candle", "offline: applying scheduled state %s", on ? "ON" : "OFF");
+            candle::apply_state(id(rgbw_led), on);
+          } else {
+            ESP_LOGW("candle", "offline and no schedule/time known: leaving the light as is");
+          }
+      - delay: 50ms  # let the light's loop write the LED before sleeping
+      - script.execute: go_to_sleep
+
+  # Precise timer wake at a scheduled event: no WiFi, set the LED and sleep again.
+  - id: event_wake
+    mode: single
+    then:
+      - lambda: |-
+          time_t now = ::time(nullptr);
+          int64_t early = candle::rtc.event_target - (int64_t) now;
+          if (early > 1 && early < 600) {
+            id(event_early_s) = (int32_t) early;  // the clock ran fast: sleep the rest
+          } else {
+            id(event_early_s) = 0;
+            candle::apply_state(id(rgbw_led), candle::rtc.event_state != 0);
+            candle::rtc.last_event_target = candle::rtc.event_target;
+            candle::rtc.last_event_actual = now;
+          }
+      - delay: 50ms  # let the light's loop write the LED before sleeping
+      - if:
+          condition:
+            lambda: 'return id(event_early_s) > 0;'
+          then:
+            - lambda: |-
+                candle::rtc.next_kind = candle::WAKE_EVENT;
+                id(sleeping) = true;
+                esp_deep_sleep_disable_rom_logging();
+                id(deep_sleep1).set_run_duration(0);
+                id(deep_sleep1).set_sleep_duration(candle::begin_sleep_ms((id(event_early_s) + candle::EVENT_LATE_S) * 1000LL));
+                id(deep_sleep1).begin_sleep();
+          else:
+            - script.execute: go_to_sleep
+
+  # Plan the next wake from the schedule and the check-in cap, report it, and sleep.
+  - id: go_to_sleep
+    mode: single
+    then:
+      - lambda: |-
+          if (id(sleeping)) return;
+          id(sleeping) = true;
+          time_t now = ::time(nullptr);
+          int64_t next_ev = 0;
+          uint8_t this_kind = candle::boot_kind;
+          uint32_t sleep_s = candle::plan_sleep(now, candle::rtc.cap_s, id(sun1), next_ev);
+
+          if (mqtt::global_mqtt_client != nullptr && mqtt::global_mqtt_client->is_connected()) {
+            esp_netif_ip_info_t ipi = {};
+            esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+            if (sta != nullptr) esp_netif_get_ip_info(sta, &ipi);
+            char wt[400];
+            snprintf(wt, sizeof(wt),
+                     "kind=%s assoc=%u gotip=%u wifi=%u sntp=%u mqtt=%u led=%u interval=%u sleep=%u ms since boot "
+                     "ip=" IPSTR " drift_ms=%d drift_ppm=%d scale_ppm=%d now=%lld next_event=%lld next=%s sleep_s=%u "
+                     "last_event=%lld last_event_actual=%lld",
+                     candle::WAKE_NAMES[this_kind], (unsigned) id(t_assoc), (unsigned) id(t_gotip), (unsigned) id(t_wifi),
+                     (unsigned) id(t_sntp), (unsigned) id(t_mqtt), (unsigned) id(t_led), (unsigned) id(t_interval),
+                     (unsigned) millis(), IP2STR(&ipi.ip), (int) id(drift_ms), (int) id(drift_ppm),
+                     (int) ((candle::rtc.sleep_scale - 1.0) * 1e6), (long long) now, (long long) next_ev,
+                     candle::WAKE_NAMES[candle::rtc.next_kind], (unsigned) sleep_s,
+                     (long long) candle::rtc.last_event_target, (long long) candle::rtc.last_event_actual);
+            ESP_LOGI("waketime", "%s", wt);
+            // Published directly (retained): log lines this close to sleep don't get out over MQTT.
+            mqtt::global_mqtt_client->publish(std::string("${dev_name}/waketime"), std::string(wt), (uint8_t) 0, true);
+          }
+          // debug_gpio drops in the esp_deep_sleep hook registered at boot.
+          esp_deep_sleep_disable_rom_logging();  // no ESP-ROM banner on next wake (~30ms at 115200)
+          id(deep_sleep1).allow_deep_sleep();
+          id(deep_sleep1).set_run_duration(0);
+          id(deep_sleep1).set_sleep_duration(candle::begin_sleep_ms(sleep_s * 1000LL));
+          id(deep_sleep1).begin_sleep();
