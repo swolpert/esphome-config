@@ -51,6 +51,10 @@ struct RtcState {
   // system clock during sleep both use it. Requested sleep = planned * sleep_scale.
   double sleep_scale;      // 0 = not calibrated yet (treated as 1.0)
   int64_t last_planned_ms, last_requested_ms;  // the sleep that ended with this wake
+  // Diagnostics for the end-of-wake publish, reported in the next waketime.
+  uint32_t wake_count;
+  uint8_t prev_pub;        // 0 = not connected, 1 = publish failed, 2 = queued, 3 = acked
+  uint16_t prev_wait_ms;   // time waited for the ack
 };
 static RTC_DATA_ATTR RtcState rtc;
 
@@ -66,6 +70,7 @@ static void rtc_init_if_needed() {
 static uint8_t boot_kind = WAKE_CHECK;
 static void decide_boot_kind() {
   rtc_init_if_needed();
+  rtc.wake_count++;
   bool timer = esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER;
   boot_kind = timer ? rtc.next_kind : (uint8_t) WAKE_CHECK;
   if (boot_kind > WAKE_EVENT) boot_kind = WAKE_CHECK;

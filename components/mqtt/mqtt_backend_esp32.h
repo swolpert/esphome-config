@@ -213,6 +213,9 @@ class MQTTBackendESP32 final : public MQTTBackend {
   using MQTTBackend::publish;
 
   void loop() final;
+  // LOCAL PATCH (esphome-config): QoS 1/2 messages not yet acknowledged by the broker, so a battery
+  // device can wait for its last publishes before deep sleep.
+  int outbox_size() { return esp_mqtt_client_get_outbox_size(handler_.get()); }
 
   void set_ca_certificate(const std::string &cert) { ca_certificate_ = cert; }
   void set_cl_certificate(const std::string &cert) { cl_certificate_ = cert; }

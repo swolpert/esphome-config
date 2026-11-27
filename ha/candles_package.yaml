@@ -181,8 +181,8 @@ automation:
 
   # OTA window for the battery candles (candleDev10+). Each candle serves a request id once: at its
   # next WiFi wake (up to the sleep interval later) it stays awake for window_s and publishes its IP on
-  # <name>/ota_ready. Then use "Install -> Wirelessly" in the ESPHome dashboard (it finds the candle
-  # through MQTT IP lookup). Requests expire after 13 h (> the 12 h cap).
+  # <name>/ota_ready. Updates queued in the ESPHome Device Builder (Install while a candle is offline)
+  # upload automatically when the candle comes online. Requests expire after 13 h (> the 12 h cap).
   - id: candles_request_ota
     alias: Candles - request OTA window
     description: Publish a retained one-shot OTA window request for the battery candles.
@@ -221,7 +221,7 @@ automation:
                 {% set p = trigger.payload_json %}
                 {{ dev }} ({{ p.ip }}) stays awake for {{ (p.window_s | int(900)) // 60 }} minutes
                 (until {{ (now() + timedelta(seconds=p.window_s | int(900))).strftime('%H:%M') }}).
-                In the ESPHome dashboard, open {{ dev }} and choose Install, then Wirelessly.
+                A queued ESPHome update installs now; otherwise use Install, then Wirelessly.
         else:
           - action: persistent_notification.dismiss
             data:

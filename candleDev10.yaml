@@ -54,6 +54,14 @@ globals:
     type: int32_t
     restore_value: no
     initial_value: '0'
+  - id: t_sleep_wait
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: planned_sleep_s
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
   - id: event_early_s
     type: int32_t
     restore_value: no
@@ -104,20 +112,6 @@ globals:
     restore_value: no
     initial_value: '0'
 
-  # Boot log capture: log lines from before MQTT connects can't go out over MQTT, so they are
-  # buffered here and published once to ${dev_name}/bootlog after the connection comes up.
-  - id: early_log
-    type: std::string
-    restore_value: no
-  - id: early_log_done
-    type: bool
-    restore_value: no
-    initial_value: 'false'
-  - id: main_task
-    type: void *
-    restore_value: no
-    initial_value: 'nullptr'
-
 esphome:
   name: ${dev_name}
   friendly_name: ${dev_friendly_name}
@@ -131,25 +125,9 @@ esphome:
         - lambda: |-
             candle::decide_boot_kind();
             if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) candle::correct_clock_after_sleep();
-            id(early_log).reserve(4096);
-            id(main_task) = (void *) xTaskGetCurrentTaskHandle();
             // Drop the debug pin at the last moment before deep sleep (after ESPHome's shutdown
             // and teardown), so the scope pulse covers the whole wake.
             esp_deep_sleep_register_hook([]() { gpio_set_level(GPIO_NUM_10, 0); });
-            if (logger::global_logger != nullptr) {
-              logger::global_logger->add_log_callback(nullptr,
-                  [](void *, uint8_t level, const char *tag, const char *message, size_t len) {
-                    // Main loop task only: the MQTT backend logs from its own task.
-                    if (id(early_log_done) || (void *) xTaskGetCurrentTaskHandle() != id(main_task)) return;
-                    if (level == ESPHOME_LOG_LEVEL_CONFIG) return;  // skip the config dump
-                    if (id(early_log).size() + len + 12 > 4000) return;
-                    char ts[12];
-                    snprintf(ts, sizeof(ts), "%6u ", (unsigned) millis());
-                    id(early_log).append(ts);
-                    id(early_log).append(message, len);
-                    id(early_log).push_back('\n');
-                  });
-            }
             ESP_LOGI("candle", "wake kind: %s", candle::WAKE_NAMES[candle::boot_kind]);
     - priority: 240  # after WiFi setup (250) created the default event loop, before association
       then:
@@ -206,12 +184,7 @@ esphome:
                         then:
                           - script.execute: offline_sleep
                         else:
-                          - lambda: |-
-                              id(t_mqtt) = millis();
-                              id(early_log_done) = true;
-                              mqtt::global_mqtt_client->publish("${dev_name}/bootlog", id(early_log));
-                              id(early_log).clear();
-                              id(early_log).shrink_to_fit();
+                          - lambda: 'id(t_mqtt) = millis();'
 
     - priority: -101
       then:
@@ -250,6 +223,11 @@ mqtt:
   # Don't connect at setup: that happens ~150ms before WiFi is up, fails, and the client's
   # 5s retry throttle then delays MQTT to ~5.1s after boot. on_boot enables MQTT once WiFi connects.
   enable_on_boot: false
+  # Fresh session per wake. With the default (false) the broker keeps the session across sleeps,
+  # including QoS 2 exchanges cut off by deep sleep (the esphome/discover reply). They piled up until
+  # Mosquitto rejected every QoS 1/2 publish ("exceeded its receive-maximum quota"). All our
+  # subscriptions are to retained topics, so a persistent session buys nothing.
+  clean_session: true
   # No topic_prefix: it would make all candles share one topic.
 
   on_json_message:
@@ -292,8 +270,9 @@ mqtt:
 
     # OTA window: {"id":<unique>,"until":<epoch>,"window_s":900}, retained, from HA's "Candles OTA
     # window" button. Each candle serves a request once: it stays awake up to window_s and publishes
-    # its IP on ${dev_name}/ota_ready (HA turns that into a notification). Then "Install ->
-    # Wirelessly" in the ESPHome dashboard finds it via MQTT IP lookup (esphome/ping, discover_ip).
+    # its IP on ${dev_name}/ota_ready (HA turns that into a notification). An update queued in the
+    # ESPHome Device Builder (Install while the candle is offline) uploads as soon as it sees the
+    # candle's MQTT status go online; the window keeps the candle awake long enough for that.
     # Unlike "always on", the candle goes back to normal sleeps after the window either way.
     - topic: "candles/ota_request"
       then:
@@ -537,7 +516,7 @@ script:
           // First sleep after a reboot (e.g. the one that follows an OTA): clear a leftover ota_ready.
           if (esp_reset_reason() != ESP_RST_DEEPSLEEP && mqtt::global_mqtt_client != nullptr &&
               mqtt::global_mqtt_client->is_connected())
-            mqtt::global_mqtt_client->publish(std::string("${dev_name}/ota_ready"), std::string(""), (uint8_t) 0, true);
+            mqtt::global_mqtt_client->publish(std::string("${dev_name}/ota_ready"), std::string(""), (uint8_t) 1, true);
           time_t now = ::time(nullptr);
           int64_t next_ev = 0;
           uint8_t this_kind = candle::boot_kind;
@@ -551,20 +530,41 @@ script:
             snprintf(wt, sizeof(wt),
                      "kind=%s assoc=%u gotip=%u wifi=%u sntp=%u mqtt=%u led=%u interval=%u sleep=%u ms since boot "
                      "ip=" IPSTR " drift_ms=%d drift_ppm=%d scale_ppm=%d now=%lld next_event=%lld next=%s sleep_s=%u "
-                     "last_event=%lld last_event_actual=%lld",
+                     "last_event=%lld last_event_actual=%lld n=%u prev_pub=%u prev_wait_ms=%u",
                      candle::WAKE_NAMES[this_kind], (unsigned) id(t_assoc), (unsigned) id(t_gotip), (unsigned) id(t_wifi),
                      (unsigned) id(t_sntp), (unsigned) id(t_mqtt), (unsigned) id(t_led), (unsigned) id(t_interval),
                      (unsigned) millis(), IP2STR(&ipi.ip), (int) id(drift_ms), (int) id(drift_ppm),
                      (int) ((candle::rtc.sleep_scale - 1.0) * 1e6), (long long) now, (long long) next_ev,
                      candle::WAKE_NAMES[candle::rtc.next_kind], (unsigned) sleep_s,
-                     (long long) candle::rtc.last_event_target, (long long) candle::rtc.last_event_actual);
+                     (long long) candle::rtc.last_event_target, (long long) candle::rtc.last_event_actual,
+                     (unsigned) candle::rtc.wake_count, (unsigned) candle::rtc.prev_pub, (unsigned) candle::rtc.prev_wait_ms);
             ESP_LOGI("waketime", "%s", wt);
             // Published directly (retained): log lines this close to sleep don't get out over MQTT.
-            mqtt::global_mqtt_client->publish(std::string("${dev_name}/waketime"), std::string(wt), (uint8_t) 0, true);
+            bool ok = mqtt::global_mqtt_client->publish(std::string("${dev_name}/waketime"), std::string(wt), (uint8_t) 1, true);
+            candle::rtc.prev_pub = ok ? 2 : 1;
+          } else {
+            candle::rtc.prev_pub = 0;
           }
+          id(planned_sleep_s) = sleep_s;
+          id(t_sleep_wait) = millis();
+      # The last publishes (waketime, ota_ready clear) are QoS 1: wait for the broker's ack before
+      # shutdown closes the socket and stops WiFi. Usually ~15 ms, but about 1 in 6 wakes loses a
+      # packet on this WiFi and needs TCP's retransmit at ~1.5 s; without the wait it was never resent.
+      # waketime reports the previous wake's outcome: prev_pub 0 = offline, 1 = publish failed,
+      # 2 = sent but no ack before sleeping, 3 = acked; prev_wait_ms = time waited.
+      - wait_until:
+          condition:
+            lambda: |-
+              auto *c = mqtt::global_mqtt_client;
+              return c == nullptr || !c->is_connected() || c->outbox_size() == 0;
+          timeout: 3s  # normally ~15 ms; a lost packet needs TCP's retransmit (>1 s)
+      - lambda: |-
+          if (id(planned_sleep_s) == 0) return;  // the first lambda bailed out (already sleeping)
+          candle::rtc.prev_wait_ms = (uint16_t) std::min<uint32_t>(millis() - id(t_sleep_wait), 65535);
+          if (candle::rtc.prev_pub == 2 && mqtt::global_mqtt_client->outbox_size() == 0) candle::rtc.prev_pub = 3;
           // debug_gpio drops in the esp_deep_sleep hook registered at boot.
           esp_deep_sleep_disable_rom_logging();  // no ESP-ROM banner on next wake (~30ms at 115200)
           id(deep_sleep1).allow_deep_sleep();
           id(deep_sleep1).set_run_duration(0);
-          id(deep_sleep1).set_sleep_duration(candle::begin_sleep_ms(sleep_s * 1000LL));
+          id(deep_sleep1).set_sleep_duration(candle::begin_sleep_ms(id(planned_sleep_s) * 1000LL));
           id(deep_sleep1).begin_sleep();
