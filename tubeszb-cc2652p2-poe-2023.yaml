@@ -34,8 +34,13 @@ esp32:
       CONFIG_UART_ISR_IN_IRAM: "y"
 
 external_components:
-  - source: github://tube0013/esphome-components
-    components: [cc2652_flasher, stream_server]
+  - source:
+      url: https://github.com/swolpert/esphome-components.git
+      type: git
+    components:
+      - cc2652_flasher
+      - stream_server
+    refresh: 0s
   - source: github://tjhorner/esphome-custom-components
     components: [ project_version ]
 
@@ -51,7 +56,9 @@ ethernet:
     pin: GPIO17
     mode: CLK_OUT
   phy_addr: 0
-  power_pin: GPIO12
+  power_pin:
+    number: 12
+    ignore_strapping_warning: true
   
     # Optional manual IP
   #manual_ip:
@@ -85,7 +92,8 @@ update:
 web_server:
   port: 80
   version: 2
-  js_url: "https://tube0013.github.io/TubesZB-ESPHome-Builder/common/www.js"
+  # js_url: "https://tube0013.github.io/TubesZB-ESPHome-Builder/common/www.js"
+  js_url: "http://192.168.1.200:8123/local/www.js"
 
 
 script:
@@ -104,7 +112,9 @@ script:
       
 switch:
   - platform: gpio
-    pin: 5
+    pin:
+      number: 5
+      ignore_strapping_warning: true
     id: zRST_gpio
     inverted: yes
     restore_mode: ALWAYS_OFF
@@ -155,17 +165,18 @@ cc2652_flasher:
   boot_baud_rate: 500000
   restore_baud_rate: 115200
   erase_mode: bank
-  debug: false
+  debug: true
   show_progress: true
   progress_step: 5
   fw_version_text: zb_fw_version
   ieee_text: zb_ieee
   latest_fw_version_text: zb_latest_fw
   variant_text: zb_variant
-  check_on_boot: false
-  check_interval_days: 7
+  check_on_boot: true
+  check_interval_days: 1
   detect_on_boot: true
   detect_on_boot_delay_ms: 0
+  variant: cc2652p2
 
 
 button:
@@ -231,7 +242,7 @@ text_sensor:
 
   - platform: project_version
     name: "TubesZB Device Firmware Version"
-    internal: true
+    # internal: true
 
   - platform: ethernet_info
     ip_address:
