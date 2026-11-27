@@ -184,7 +184,21 @@ esphome:
                         then:
                           - script.execute: offline_sleep
                         else:
-                          - lambda: 'id(t_mqtt) = millis();'
+                          - lambda: |-
+                              id(t_mqtt) = millis();
+                              // Wake-start report, sent the moment MQTT is up: arrives even if the wake
+                              // dies before waketime, and RSSI/channel explain lost packets.
+                              wifi_ap_record_t ap = {};
+                              bool have_ap = esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
+                              float batt = id(adc_batt_voltage).state;
+                              char msg[200];
+                              snprintf(msg, sizeof(msg),
+                                       "kind=%s reset=%d rssi=%d ch=%u assoc=%u gotip=%u wifi=%u mqtt=%u batt=%.2f",
+                                       candle::WAKE_NAMES[candle::boot_kind], (int) esp_reset_reason(),
+                                       have_ap ? (int) ap.rssi : 0, have_ap ? (unsigned) ap.primary : 0u,
+                                       (unsigned) id(t_assoc), (unsigned) id(t_gotip), (unsigned) id(t_wifi),
+                                       (unsigned) id(t_mqtt), std::isnan(batt) ? 0.0f : batt);
+                              mqtt::global_mqtt_client->publish(std::string("${dev_name}/wake"), std::string(msg), (uint8_t) 0, false);
 
     - priority: -101
       then:
@@ -203,6 +217,9 @@ esp32:
       CONFIG_LWIP_DHCP_DOES_ARP_CHECK: n                # DHCP: skip the ARP conflict probe on each lease
       CONFIG_LWIP_DHCP_RESTORE_LAST_IP: y               # DHCP: re-request the last IP (no DISCOVER); NVS write only when the IP changes
       CONFIG_LWIP_SNTP_STARTUP_DELAY: n                 # SNTP: send the first request right away, not after a random delay
+      CONFIG_LWIP_TCP_TMR_INTERVAL: "50"                # TCP timer 250 -> 50 ms: delayed ACKs go out within 50 ms. Mosquitto (Nagle on)
+                                                        # holds the retained messages until our ACK of its first SUBACK, which cost
+                                                        # ~165 ms per wake. Also retransmits lost packets sooner.
 
 # Local copy of ESPHome 2026.9.1's mqtt component without the 100ms post-connect delay.
 # See components/README.md before upgrading ESPHome.
