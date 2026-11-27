@@ -64,7 +64,8 @@ What mattered:
 
 Telemetry the candle publishes on each wake:
 - `${dev_name}/waketime` (retained): `millis()` at association (`assoc`), DHCP (`gotip`), ESPHome WiFi connected, MQTT, first `candles/led`, first `candles/sleep_interval`, and the sleep decision, plus the current IP.
-- `${dev_name}/wake` (Dev10, not retained): sent the moment MQTT connects: wake kind, `esp_reset_reason()`, RSSI, WiFi channel, the assoc/DHCP/WiFi/MQTT timings and battery voltage.
+- `${dev_name}/wake` (Dev10, not retained): short health message sent the moment MQTT connects (the earliest possible point): wake kind, `esp_reset_reason()`, RSSI, WiFi channel, battery voltage. Always on.
+- `${dev_name}/waketime` is the timing/debug report. In Dev10 it's sent only while retained `candles/debug_waketime` is `on` (HA toggle "Candles debug telemetry", Candle schedule card); off by default, which saves the publish and its ack wait.
 - Retained-message latency: Mosquitto (Nagle on) sends the first SUBACK, then holds the retained `candles/*` messages until the candle ACKs it, and lwIP sends delayed ACKs only on its TCP timer tick (`CONFIG_LWIP_TCP_TMR_INTERVAL`, default 250 ms). That cost ~165 ms per wake (the old 1 KB bootlog publish happened to carry the ACK early). Dev10 sets the interval to 50 ms.
 - `${dev_name}/bootlog` (Dev4 only; removed in Dev10 to save time and memory on each wake, use the serial log instead): the log lines from before MQTT connects.
 

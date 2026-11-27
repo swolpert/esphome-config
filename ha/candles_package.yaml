@@ -26,6 +26,7 @@
 #     - sensor.candles_on_today
 #     - select.candles_sleep_interval_mqtt
 #     - input_button.candles_ota_window
+#     - input_boolean.candles_debug_telemetry
 
 input_button:
   # Ask every candle to stay awake for one OTA window at its next WiFi wake (see candles_request_ota).
@@ -37,6 +38,10 @@ input_boolean:
   candles_schedule:
     name: Candles schedule
     icon: mdi:calendar-clock
+  # Battery candles publish <name>/waketime (wake timing debug report) only while this is on.
+  candles_debug_telemetry:
+    name: Candles debug telemetry
+    icon: mdi:timer-cog-outline
 
 input_select:
   candles_on_mode:
@@ -131,6 +136,22 @@ template:
              or state_attr('sensor.candles_sun_today', 'sunset') is not none }}
 
 automation:
+  - id: candles_debug_telemetry_publish
+    alias: Candles - publish debug telemetry switch
+    description: Retained candles/debug_waketime (on/off) for the battery candles.
+    mode: queued
+    triggers:
+      - trigger: state
+        entity_id: input_boolean.candles_debug_telemetry
+      - trigger: homeassistant
+        event: start
+    actions:
+      - action: mqtt.publish
+        data:
+          topic: candles/debug_waketime
+          payload: "{{ 'on' if is_state('input_boolean.candles_debug_telemetry', 'on') else 'off' }}"
+          retain: true
+
   - id: candles_schedule_publish
     alias: Candles - publish schedule
     description: Publish the schedule rule retained to candles/schedule for the battery candles.

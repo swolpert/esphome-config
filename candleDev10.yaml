@@ -54,6 +54,14 @@ globals:
     type: int32_t
     restore_value: no
     initial_value: '0'
+  - id: waketime_on
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: waketime_flag_received
+    type: bool
+    restore_value: no
+    initial_value: 'false'
   - id: t_sleep_wait
     type: uint32_t
     restore_value: no
@@ -186,18 +194,16 @@ esphome:
                         else:
                           - lambda: |-
                               id(t_mqtt) = millis();
-                              // Wake-start report, sent the moment MQTT is up: arrives even if the wake
-                              // dies before waketime, and RSSI/channel explain lost packets.
+                              // ${dev_name}/wake: short health message, as early as possible (the moment
+                              // MQTT is up). Timings are in the debug-only waketime.
                               wifi_ap_record_t ap = {};
                               bool have_ap = esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
                               float batt = id(adc_batt_voltage).state;
-                              char msg[200];
-                              snprintf(msg, sizeof(msg),
-                                       "kind=%s reset=%d rssi=%d ch=%u assoc=%u gotip=%u wifi=%u mqtt=%u batt=%.2f",
+                              char msg[96];
+                              snprintf(msg, sizeof(msg), "kind=%s reset=%d rssi=%d ch=%u batt=%.2f",
                                        candle::WAKE_NAMES[candle::boot_kind], (int) esp_reset_reason(),
                                        have_ap ? (int) ap.rssi : 0, have_ap ? (unsigned) ap.primary : 0u,
-                                       (unsigned) id(t_assoc), (unsigned) id(t_gotip), (unsigned) id(t_wifi),
-                                       (unsigned) id(t_mqtt), std::isnan(batt) ? 0.0f : batt);
+                                       std::isnan(batt) ? 0.0f : batt);
                               mqtt::global_mqtt_client->publish(std::string("${dev_name}/wake"), std::string(msg), (uint8_t) 0, false);
 
     - priority: -101
@@ -320,6 +326,13 @@ mqtt:
             ESP_LOGI("candle", "OTA window open for %us: %s", (unsigned) window_s, msg);
 
   on_message:
+    # Debug telemetry switch (retained "on"/"off", HA's "Candles debug telemetry"): publish
+    # ${dev_name}/waketime at the end of each wake. Off (or unset) saves that publish and its ack wait.
+    - topic: "candles/debug_waketime"
+      then:
+        - lambda: |-
+            id(waketime_on) = (strcasecmp(x.c_str(), "on") == 0);
+            id(waketime_flag_received) = true;
     - topic: "candles/sleep_interval"
       then:
         - lambda: |-
@@ -473,7 +486,8 @@ script:
               return id(latest_light_state) != "none" && id(mqtt_done_sleep_interval) && id(adc_done_switch) &&
                      // SNTP is best effort, but wait longer when the clock has never been set.
                      (id(sntp_done) || since_mqtt > (candle::time_valid(::time(nullptr)) ? 3000u : 10000u)) &&
-                     (id(schedule_received) || since_mqtt > 1000);    // retained, so it comes with the others
+                     (id(schedule_received) || since_mqtt > 1000) &&   // retained, so it comes with the others
+                     (id(waketime_flag_received) || since_mqtt > 1000);
           then:
             - script.execute: go_to_sleep
 
@@ -539,7 +553,9 @@ script:
           uint8_t this_kind = candle::boot_kind;
           uint32_t sleep_s = candle::plan_sleep(now, candle::rtc.cap_s, id(sun1), next_ev);
 
-          if (mqtt::global_mqtt_client != nullptr && mqtt::global_mqtt_client->is_connected()) {
+          if (!id(waketime_on)) {
+            candle::rtc.prev_pub = 0;  // waketime off: nothing sent
+          } else if (mqtt::global_mqtt_client != nullptr && mqtt::global_mqtt_client->is_connected()) {
             esp_netif_ip_info_t ipi = {};
             esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
             if (sta != nullptr) esp_netif_get_ip_info(sta, &ipi);
