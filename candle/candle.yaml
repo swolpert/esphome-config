@@ -1,0 +1,158 @@
+# Battery candle: shared config for every candleNN.yaml. A candle file sets dev_name and
+# dev_friendly_name, includes this file, and optionally sets a static IP.
+#
+#   candle/candle.yaml  what the candle is: board, network, LED, battery ADC, clock, sun   (this file)
+#   candle/mqtt.yaml    the broker and the candles/* inputs
+#   candle/wake.yaml    the wake -> sleep flow
+#   candle/candle.h     the C++ behind them: schedule math, telemetry, OTA window
+#
+# Hardware: DFRobot Beetle ESP32-C3, SK6812 RGBW LED on GPIO0, battery ADC on GPIO3, blue status LED
+# on GPIO8, debug pin GPIO10 (high while awake, for a scope). Serial log: UART0 TX = GPIO21, 115200.
+
+packages:
+  mqtt: !include mqtt.yaml
+  wake: !include wake.yaml
+
+esphome:
+  name: ${dev_name}
+  friendly_name: ${dev_friendly_name}
+  includes:
+    - candle/candle.h
+
+esp32:
+  board: dfrobot_beetle_esp32c3
+  variant: esp32c3
+  framework:
+    type: arduino
+    sdkconfig_options:
+      # Wake-time savings in the 2nd-stage bootloader. These live in the bootloader, which OTA
+      # never updates, so they only take effect after a USB flash of firmware.factory.bin.
+      CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP: y  # skip hashing the ~1.1MB app on wake (~200ms)
+      CONFIG_BOOTLOADER_LOG_LEVEL_WARN: y               # no partition-table/segment prints (~100ms at 115200)
+      CONFIG_LWIP_DHCP_DOES_ARP_CHECK: n                # DHCP: skip the ARP conflict probe on each lease
+      CONFIG_LWIP_DHCP_RESTORE_LAST_IP: y               # DHCP: re-request the last IP (no DISCOVER)
+      CONFIG_LWIP_SNTP_STARTUP_DELAY: n                 # SNTP: send the first request right away
+      # TCP timer 250 -> 50 ms: delayed ACKs go out within 50 ms. Mosquitto (Nagle on) holds the
+      # retained messages until we ACK its first SUBACK, which cost ~165 ms per wake. Also
+      # retransmits lost packets sooner.
+      CONFIG_LWIP_TCP_TMR_INTERVAL: "50"
+
+# Patched copy of ESPHome 2026.9.1's mqtt component. See components/README.md before upgrading ESPHome.
+external_components:
+  - source:
+      type: local
+      path: components
+    components: [mqtt]
+
+# ---------------------------------------------------------------------------------------------------
+# Network. DHCP by default; a static IP goes in the candle's own file (wifi: manual_ip:).
+# ---------------------------------------------------------------------------------------------------
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  fast_connect: true
+  ap:  # fallback hotspot (captive portal) if the WiFi can't be reached
+    ssid: "${dev_name} Fallback Hotspot"
+    password: !secret wifi_fallback_ap_password
+
+captive_portal:
+
+safe_mode:
+  disabled: true
+
+logger:
+  level: INFO  # no per-wake config dump or DEBUG chatter at 115200 baud
+  baud_rate: 115200
+  hardware_uart: UART0
+
+ota:
+  - platform: esphome
+
+web_server:
+  port: 80
+  version: 2
+
+# ---------------------------------------------------------------------------------------------------
+# LEDs and outputs
+# ---------------------------------------------------------------------------------------------------
+light:
+  - platform: esp32_rmt_led_strip
+    id: rgbw_led
+    name: "Candle"
+    icon: mdi:candle
+    chipset: SK6812
+    channel_colors: GRBW
+    pin: GPIO0
+    num_leds: 1
+    default_transition_length: 0s
+    internal: true
+    # Color/brightness/effect are saved at shutdown and restored on each wake, so the schedule
+    # only has to switch the state.
+    restore_mode: RESTORE_DEFAULT_OFF
+    effects:
+      - flicker:
+      - flicker:
+          name: "Custom Flicker"
+          alpha: 95%
+          intensity: 5%
+
+  - platform: monochromatic
+    output: blue_led_pwm
+    id: blue_led_light
+    name: "Blue LED"
+    restore_mode: ALWAYS_ON
+    internal: true
+    disabled_by_default: true
+    effects:
+      - pulse:
+          name: "Custom Pulse"
+          transition_length: 1.5s
+          update_interval: 1.5s
+          min_brightness: 10%
+          max_brightness: 85%
+    on_turn_on:
+      then:
+        - light.turn_on:
+            id: blue_led_light
+            effect: "Custom Pulse"
+
+output:
+  - platform: ledc
+    id: blue_led_pwm
+    pin: GPIO8  # strapping pin
+    inverted: true
+  - platform: gpio
+    id: debug_gpio
+    pin: GPIO10
+
+# ---------------------------------------------------------------------------------------------------
+# Battery, clock and sun
+# ---------------------------------------------------------------------------------------------------
+sensor:
+  - platform: adc
+    id: adc_batt_voltage
+    name: "Battery Voltage"
+    pin: GPIO3
+    attenuation: 12db
+    update_interval: 60s  # sampled once per wake from on_boot
+    entity_category: diagnostic
+    on_value:
+      - lambda: 'candle::wake.adc_done = true;'
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: America/New_York
+    # IPs, not names: the IoT VLAN firewall only allows NTP to a fixed list (and it skips DNS).
+    servers:
+      - 162.159.200.123  # Cloudflare (anycast, ~7 ms)
+      - 216.239.35.0     # time.google.com
+      - 129.6.15.28      # NIST Gaithersburg
+    on_time_sync:
+      - lambda: 'candle::on_time_sync();'
+
+sun:  # for sunset/sunrise schedules
+  id: sun1
+  time_id: sntp_time
+  latitude: !secret candle_latitude
+  longitude: !secret candle_longitude

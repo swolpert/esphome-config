@@ -1,0 +1,112 @@
+# The wake -> sleep flow, top to bottom. The functions are in candle/candle.h.
+#
+#   EVENT wake (precise timer wake at a scheduled on/off):  set the LED, sleep. No WiFi.
+#   Normal wake:  WiFi -> MQTT -> retained inputs arrive -> go_to_sleep.
+#   WiFi or MQTT down:  follow the mirrored schedule offline, sleep.
+#
+# go_to_sleep plans the next wake (schedule + check-in cap), sends the last messages, waits for the
+# broker's ack (usually ~15 ms; up to 3 s when the WiFi drops a packet), then deep sleeps.
+
+esphome:
+  on_boot:
+    - priority: 800  # before WiFi (250) and MQTT (200) are set up
+      then:
+        - lambda: 'candle::boot_early();'
+    - priority: 600  # after the LED is set up
+      then:
+        - output.turn_on: debug_gpio
+        - if:
+            condition:
+              lambda: 'return candle::boot_kind == candle::WAKE_EVENT;'
+            then:
+              - script.execute: event_wake
+            else:
+              - script.execute: connect_network
+    - priority: 240  # WiFi's event loop exists, association hasn't happened yet
+      then:
+        - lambda: 'candle::register_wifi_hooks();'
+    - priority: -101
+      then:
+        - component.update: adc_batt_voltage
+
+# Normal wake: sleep as soon as the retained inputs, the ADC sample and the clock are in.
+interval:
+  - interval: 200ms
+    then:
+      - if:
+          condition:
+            lambda: 'return candle::boot_kind != candle::WAKE_EVENT && candle::ready_to_sleep();'
+          then:
+            - script.execute: go_to_sleep
+
+deep_sleep:
+  id: deep_sleep1
+  run_duration: 30s   # safety net: a stuck wake still sleeps, so the battery survives
+  sleep_duration: 5s  # ...briefly, then tries again
+
+script:
+  - id: connect_network
+    mode: single
+    then:
+      - wait_until:
+          condition:
+            wifi.connected:
+          timeout: 10s
+      - if:
+          condition:
+            not:
+              wifi.connected:
+          then:
+            - script.execute: offline_sleep
+          else:
+            - lambda: 'candle::on_wifi_connected();'
+            - wait_until:
+                condition:
+                  lambda: 'return mqtt::global_mqtt_client->is_in_loop_state();'
+                timeout: 5s
+            - mqtt.enable:
+            - wait_until:
+                condition:
+                  mqtt.connected:
+                timeout: 10s
+            - if:
+                condition:
+                  not:
+                    mqtt.connected:
+                then:
+                  - script.execute: offline_sleep
+                else:
+                  - lambda: 'candle::on_mqtt_connected(id(adc_batt_voltage).state);'
+
+  - id: event_wake
+    mode: single
+    then:
+      - lambda: 'candle::apply_event(rgbw_led);'
+      - delay: 50ms  # let the LED write finish
+      - if:
+          condition:
+            lambda: 'return candle::wake.event_early_s > 0;'
+          then:  # the clock says we're early: sleep the rest
+            - lambda: 'candle::sleep_now(deep_sleep1, candle::wake.event_early_s + candle::EVENT_LATE_S);'
+          else:
+            - script.execute: go_to_sleep
+
+  - id: offline_sleep
+    mode: single
+    then:
+      - lambda: 'candle::apply_offline(rgbw_led, sun1);'
+      - delay: 50ms  # let the LED write finish
+      - script.execute: go_to_sleep
+
+  - id: go_to_sleep
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return candle::prepare_sleep(sun1);'
+          then:
+            - wait_until:
+                condition:
+                  lambda: 'return candle::last_publishes_done();'
+                timeout: 3s
+            - lambda: 'candle::sleep_now(deep_sleep1);'

@@ -16,8 +16,8 @@ Every device file sets `substitutions:` (`dev_name`, `dev_friendly_name`, `dev_u
 
 | Devices | Base layer (wifi/ota/logger/web_server) | Device layer |
 |---|---|---|
-| `candle02`–`candle10` | `.base.yaml` | `.esp32_candlestick.yaml`: always-on, Home Assistant time |
-| `candle01`, `candle-test` | `baseCandle.yaml` (static IP, MQTT-era) | `candleDevN.yaml`: battery/deep-sleep development versions |
+| `candle01`–`candle10` (battery candles) | `candle/candle.yaml` (all of it; see below) | |
+| `candle-test` | `baseCandle.yaml` | `candleDev9.yaml` (abandoned RTC experiment) |
 | `den1`, `piano1`, `plug01`, `lamp-plug`, `play1`, `dining1`, `lemon-tree` | `.base.yaml` | `.etekcity_plug.yaml` (ESP8266 `esp01_1m`) |
 | `den-fanlight` | `.base-tuya.yaml` | inline |
 | `guest-fanlight`, `studio-fanlight`, `guest-2gang-switch`, `kids-lamp-rgb`, `tubeszb-*` | self-contained | |
@@ -30,13 +30,26 @@ Put per-device values in the device file's substitutions, not in shared layers. 
 
 DFRobot Beetle ESP32-C3 (Arduino framework). SK6812 RGBW LED on GPIO0 in candle01 / GPIO21 in candle02–10 (`esp32_rmt_led_strip`, `channel_colors: GRBW`; the old `candleDevN` files still use `neopixelbus`). Blue status LED on GPIO8 (LEDC PWM, inverted; strapping pin). Battery ADC on GPIO3. `debug_gpio` on GPIO10 goes high at boot so wake time can be measured on a scope. Some boards have a DS3231 RTC on I2C (SDA GPIO4 / SCL GPIO5, address 0x68).
 
-## candleDev versions (battery candles, MQTT-controlled)
+## Battery candles: `candle/` (current)
+
+Each `candleNN.yaml` is a few lines: `dev_name`, `dev_friendly_name`, `packages: candle: !include candle/candle.yaml`, and a commented `wifi: manual_ip:` block (DHCP by default, optionally with a DHCP reservation; uncomment for a static IP). Package dicts deep-merge, so a `wifi:` block in the candle file adds to the shared one. To add a candle, copy `candle01.yaml` and change the two names (and the IP if static).
+
+The shared config lives in `candle/` because the Device Builder only lists top-level, non-dot `*.yaml` files (`esphome.util.list_yaml_files` is non-recursive): files in a subfolder are invisible to it but work with `!include`.
+
+- `candle/candle.yaml`: what the candle is: board and sdkconfig, network (wifi, ota, logger, web_server v2), LEDs, battery ADC, SNTP, sun. Pulls in the other two.
+- `candle/mqtt.yaml`: broker and the `candles/*` inputs, each a one-line call into the header.
+- `candle/wake.yaml`: the wake → sleep flow (on_boot, interval, scripts `connect_network`, `event_wake`, `offline_sleep`, `go_to_sleep`). Don't name a script `connect`: it clashes with the C `connect()`.
+- `candle/candle.h`: all the C++: schedule and sleep planning (RTC memory) and the per-wake state `candle::wake` (milestones, inputs, OTA window, telemetry). Pointers to components are the plain ids (`rgbw_led`, `deep_sleep1`, `sun1`); `App.get_name()` gives the device name for topics.
+
+This replaced `candleDev10.yaml` + `candle_schedule.h` on 2026-11-26 with the same behavior (verified on candle01: normal wakes, telemetry switch, EVENT wakes switching the LED). Git is the version history from here; `candleDevN.yaml`, `candle_schedule.h`, `candle_includes.h` and `.esp32_candlestick.yaml` (old always-on candle design, never deployed) remain as records.
+
+## candleDev versions (history, MQTT-controlled)
 
 `candleDevN.yaml` (and the `.esp32_candlestick_dev*.yaml` / `.candle_mqtt_schedule_dev*` dot-files) were the user's version control before they used git. Keep them as a record of progress, but don't edit or "fix" old numbers. File dates don't follow the numbering. The line went 1→9, the RTC-alarm approach in 9 didn't work out, and **development continued from 4**. All of these versions talk MQTT only (broker 192.168.1.200, no `api:`).
 
 - **`candleDev4.yaml`**: the line that `candleDev10` grew from (fast wake work, see below). Its `${dev_name}/waketime` publish is broken: `publish(topic, char*, 0, true)` resolves to the `(topic, payload, length, qos)` overload and sends an *empty* retained message, which wipes the topic. Dev10 passes `std::string`s.
   Original description: The goal is a fast, reliable sleep→wake→sleep cycle. On each wake it waits for the light state on `candles/led` (an ESPHome light JSON payload, applied via `LightJSONSchema::parse_json`), the sleep interval on `candles/sleep_interval` (e.g. `10m`, `1h`, or `always on` to stay awake for OTA) and a battery ADC sample. Then `consider_deep_sleep` deep sleeps for that interval. An `interval:` of 12s re-runs the check.
-- **`candleDev10.yaml`** (used by `candle01`): **the active line.** Dev4 plus a mirrored schedule and schedule-aware sleeps. C++ is in `candle_schedule.h`.
+- **`candleDev10.yaml`**: the last numbered version, now superseded by `candle/` (same behavior, reorganized). Dev4 plus a mirrored schedule and schedule-aware sleeps. C++ is in `candle_schedule.h`.
   - HA publishes a retained rule to `candles/schedule`: `{"en":1,"on":"sunset-30","off":"22:00"}`. `on`/`off` are `HH:MM` or `sunset±N`/`sunrise±N` (minutes, the same syntax as Simple Scheduler). The candle computes the times with ESPHome's `sun` component (`!secret candle_latitude`/`candle_longitude`) and keeps the rule in RTC memory (lost on a battery swap).
   - **HA decides**: the retained `candles/led` is applied on every wake that reaches MQTT and overrides the schedule. The candle switches by itself only on EVENT wakes and when WiFi/MQTT is down (`offline_sleep`).
   - `candles/sleep_interval` now means the max time between check-ins (`12 hr` normally; `always on` for OTA).
@@ -49,7 +62,7 @@ MQTT topics under `candles/` are shared by all candles; per-device topics use `$
 
 JSON in lambdas: use `DynamicJsonDocument doc(1024);` and `obj["k"].is<T>()`. They compile on both ArduinoJson 6 and 7 (DynamicJsonDocument is deprecated on 7 but builds), so configs work on the user's pinned ESPHome and on newer ones. `JsonDocument doc;` is 7-only; `containsKey` is deprecated.
 
-Deprecations: `neopixelbus` on ESP32 (removal targeted for 2027.1) was replaced by `esp32_rmt_led_strip` in `candleDev10.yaml` and `.esp32_candlestick.yaml` on 2026-11-26; use `channel_colors`, since `rgb_order`/`is_rgbw` are deprecated too (removal 2027.3). `baseCandle.yaml` and `.base.yaml` use `web_server: version: 2` (2026-11-26; version 1 is removed in 2027.1). With v2, `den1` (ESP8266 `esp01_1m`) is 435 KB, still under the ~510 KB OTA limit. candle02–10 (`.esp32_candlestick.yaml`) have never been set up in HA (only candle01 is in the device registry); they're configs for future always-on candles.
+Deprecations: `neopixelbus` on ESP32 (removal targeted for 2027.1) was replaced by `esp32_rmt_led_strip` in `candleDev10.yaml` and `.esp32_candlestick.yaml` on 2026-11-26; use `channel_colors`, since `rgb_order`/`is_rgbw` are deprecated too (removal 2027.3). `baseCandle.yaml` and `.base.yaml` use `web_server: version: 2` (2026-11-26; version 1 is removed in 2027.1). With v2, `den1` (ESP8266 `esp01_1m`) is 435 KB, still under the ~510 KB OTA limit. candle02–10 are now battery candles like candle01 (`candle/`); the earlier always-on design (`.esp32_candlestick.yaml`) was never deployed.
 
 ## Wake time (battery candles, candleDev4 and 10)
 
