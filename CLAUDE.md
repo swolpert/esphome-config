@@ -38,6 +38,7 @@ The shared config lives in `candle/` because the Device Builder only lists top-l
 
 - `candle/candle.yaml`: what the candle is: board and sdkconfig, network (wifi, ota, logger, web_server v2), LEDs, battery ADC, SNTP, sun. Pulls in the other two.
 - `candle/mqtt.yaml`: broker and the `candles/*` inputs, each a one-line call into the header.
+- `safe_mode` (in `candle/candle.yaml`) is on with `boot_is_good_on_shutdown: true` and `storage: rtc`, so OTA rollback works: a wake that reaches a clean deep sleep counts as a good boot, and the boot counter lives in RTC memory (the flash default would write NVS on every wake). Rollback needs the bootloader from a USB flash. Verified on candle01: 17 consecutive 8 s wakes without entering safe mode.
 - `candle/wake.yaml`: the wake → sleep flow (on_boot, interval, scripts `connect_network`, `event_wake`, `offline_sleep`, `go_to_sleep`). Don't name a script `connect`: it clashes with the C `connect()`.
 - `candle/candle.h`: all the C++: schedule and sleep planning (RTC memory) and the per-wake state `candle::wake` (milestones, inputs, OTA window, telemetry). Pointers to components are the plain ids (`rgbw_led`, `deep_sleep1`, `sun1`); `App.get_name()` gives the device name for topics.
 

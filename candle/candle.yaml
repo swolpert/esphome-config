@@ -57,8 +57,15 @@ wifi:
 
 captive_portal:
 
+# safe_mode makes OTA rollback work: firmware that crashes before it ever sleeps is rolled back by
+# the bootloader on the next boot, and a candle in a crash loop stays awake in safe mode (reachable
+# for an OTA fix) instead of being lost. Rollback needs the bootloader from a USB flash of
+# firmware.factory.bin; until then only the safe-mode part applies.
 safe_mode:
-  disabled: true
+  boot_is_good_on_shutdown: true  # a wake that reaches a clean deep sleep is a good boot (default; explicit
+                                  # because the 1 min boot_is_good_after never elapses on a ~1.5 s wake)
+  storage: rtc  # boot counter in RTC memory (survives deep sleep and crash resets): the default (flash)
+                # writes and syncs NVS on every wake
 
 logger:
   level: INFO  # no per-wake config dump or DEBUG chatter at 115200 baud
