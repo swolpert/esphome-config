@@ -343,9 +343,7 @@ light:
 output:
   - platform: ledc
     id: blue_led_pwm
-    pin:
-      number: GPIO8
-      ignore_strapping_warning: true
+    pin: GPIO8
     inverted: true
     min_power: 0%
     max_power: 100%
