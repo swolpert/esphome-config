@@ -5,7 +5,12 @@
 #
 # What it does:
 #  - Dashboard helpers pick the on time (fixed time, or sunset/sunrise +/- an offset) and the off time.
-#  - The rule is published retained to candles/schedule, e.g. {"en":1,"on":"sunset-30","off":"22:00"}.
+#  - The rule is published retained to candles/schedule, e.g.
+#    {"en":1,"on":"sunset-30","off":"22:00","look":[255,100,10,40,180]}.
+#  - "Candles on look" (a template light, tap it for the color picker) is the color and brightness of
+#    the daily turn-on: look = [r, g, b, w, brightness]. Candles use it on their own precise turn-on
+#    wake, and HA sends it with the scheduled turn-on, so the light is the same every evening no
+#    matter what color it was left at.
 #    Battery candles (candleDev10.yaml) mirror it and switch on/off by themselves when HA/MQTT is
 #    unreachable, and plan their sleeps around it.
 #  - At the on/off times HA switches light.candles_rgb_mqtt, which publishes the retained candles/led.
@@ -20,6 +25,7 @@
 #     - light.candles_rgb_mqtt
 #     - input_boolean.candles_schedule
 #     - input_select.candles_on_mode
+#     - type: simple-entity, entity: light.candles_on_look, state_color: true
 #     - input_number.candles_on_offset
 #     - input_datetime.candles_on_time
 #     - input_datetime.candles_off_time
@@ -61,6 +67,14 @@ input_number:
     unit_of_measurement: min
     mode: slider
 
+# The daily turn-on look as "r,g,b,w,brightness" (0-255). Edited through light.candles_on_look.
+input_text:
+  candles_on_look_value:
+    name: Candles on look value
+    icon: mdi:palette
+    max: 32
+    pattern: "^\\d{1,3},\\d{1,3},\\d{1,3},\\d{1,3},\\d{1,3}$"
+
 input_datetime:
   candles_on_time:
     name: Candles on time (fixed)
@@ -95,7 +109,52 @@ template:
             {% set s = state_attr('sun.sun', 'next_rising') | as_datetime | as_local %}
             {{ (s if s.date() == now().date() else s - timedelta(days=1)).isoformat() }}
 
+  # The daily turn-on look, editable with the normal light color picker (color wheel, color and
+  # white brightness, overall brightness). Always "on"; its icon shows the color.
+  - light:
+      - name: Candles on look
+        unique_id: candles_on_look
+        icon: mdi:candle
+        state: "{{ true }}"
+        level: >-
+          {% set v = states('input_text.candles_on_look_value').split(',') | map('int', -1) | list %}
+          {% set v = v if v | length == 5 and v | min >= 0 and v | max <= 255 else [255, 100, 10, 40, 180] %}
+          {{ v[4] }}
+        rgbw: >-
+          {% set v = states('input_text.candles_on_look_value').split(',') | map('int', -1) | list %}
+          {% set v = v if v | length == 5 and v | min >= 0 and v | max <= 255 else [255, 100, 10, 40, 180] %}
+          {{ (v[0], v[1], v[2], v[3]) }}
+        turn_on: []
+        turn_off: []
+        set_level:
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.candles_on_look_value
+            data:
+              value: >-
+                {% set v = states('input_text.candles_on_look_value').split(',') | map('int', -1) | list %}
+                {% set v = v if v | length == 5 and v | min >= 0 and v | max <= 255 else [255, 100, 10, 40, 180] %}
+                {{ (v[:4] + [brightness | int]) | join(',') }}
+        set_rgbw:
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.candles_on_look_value
+            data:
+              value: >-
+                {% set v = states('input_text.candles_on_look_value').split(',') | map('int', -1) | list %}
+                {% set v = v if v | length == 5 and v | min >= 0 and v | max <= 255 else [255, 100, 10, 40, 180] %}
+                {{ [r, g, b, w, brightness | default(v[4]) | int] | join(',') }}
+
   - sensor:
+      # The daily turn-on look as a list [r, g, b, w, brightness].
+      - name: Candles on look list
+        unique_id: candles_on_look_list
+        icon: mdi:palette
+        state: >-
+          {% set v = states('input_text.candles_on_look_value').split(',') | map('int', -1) | list %}
+          {% set v = v if v | length == 5 and v | min >= 0 and v | max <= 255 else [255, 100, 10, 40, 180] %}
+          {{ v | to_json }}
+
       # The rule the candles mirror (published retained to candles/schedule).
       - name: Candles schedule rule
         unique_id: candles_schedule_rule
@@ -110,7 +169,8 @@ template:
           {% endif %}
           {{ {'en': 1 if is_state('input_boolean.candles_schedule', 'on') else 0,
               'on': on,
-              'off': states('input_datetime.candles_off_time')[:5]} | to_json }}
+              'off': states('input_datetime.candles_off_time')[:5],
+              'look': states('sensor.candles_on_look_list') | from_json([255, 100, 10, 40, 180])} | to_json }}
 
       # Today's on time (may be in the past); the switch automation fires at it.
       - name: Candles on today
@@ -191,13 +251,43 @@ automation:
               - condition: trigger
                 id: "on"
             sequence:
+              - variables:
+                  look: "{{ states('sensor.candles_on_look_list') | from_json([255, 100, 10, 40, 180]) }}"
               - action: light.turn_on
                 target:
                   entity_id: light.candles_rgb_mqtt
+                data:
+                  rgbw_color: "{{ look[:4] }}"
+                  brightness: "{{ look[4] }}"
         default:
           - action: light.turn_off
             target:
               entity_id: light.candles_rgb_mqtt
+
+  # Editing the look while the candles are on shows it on them too (at each candle's next wake).
+  - id: candles_on_look_apply
+    alias: Candles - apply edited on look
+    description: While the candles are on, a changed on look is sent to them right away.
+    mode: restart
+    triggers:
+      - trigger: state
+        entity_id: sensor.candles_on_look_list
+    conditions:
+      - condition: state
+        entity_id: light.candles_rgb_mqtt
+        state: "on"
+      - condition: template
+        value_template: "{{ trigger.from_state is not none and trigger.from_state.state not in ['unknown', 'unavailable'] }}"
+    actions:
+      - delay: 2  # the color picker sends a burst while dragging; publish the final one
+      - variables:
+          look: "{{ states('sensor.candles_on_look_list') | from_json([255, 100, 10, 40, 180]) }}"
+      - action: light.turn_on
+        target:
+          entity_id: light.candles_rgb_mqtt
+        data:
+          rgbw_color: "{{ look[:4] }}"
+          brightness: "{{ look[4] }}"
 
   # OTA window for the battery candles (candleDev10+). Each candle serves a request id once: at its
   # next WiFi wake (up to the sleep interval later) it stays awake for window_s and publishes its IP on

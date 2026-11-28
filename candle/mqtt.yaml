@@ -2,7 +2,8 @@
 # after connecting. Each handler is one call into candle/candle.h.
 #
 #   candles/led             light state (HA's JSON light); overrides the schedule      on_led
-#   candles/schedule        {"en","on","off"} rule, mirrored for offline on/off         on_schedule
+#   candles/schedule        {"en","on","off","look"} rule + turn-on look, mirrored for  on_schedule
+#                           offline on/off and the precise turn-on (EVENT) wake
 #   candles/sleep_interval  max time between check-ins, or "always on"                  on_sleep_interval
 #   candles/ota_request     one-shot OTA window from HA's "Candles OTA window" button   on_ota_request
 #   candles/debug_waketime  "on" = publish <name>/waketime each wake                    on_debug_waketime

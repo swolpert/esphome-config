@@ -57,7 +57,7 @@ struct Rule {
   int16_t minutes;  // RULE_TIME: minutes after local midnight; sun rules: offset in minutes
 };
 
-static constexpr uint32_t RTC_MAGIC = 0xCA9D1E10;
+static constexpr uint32_t RTC_MAGIC = 0xCA9D1E11;  // bump when RtcState changes
 static constexpr double SUN_ELEVATION = -0.83333;  // standard sunrise/sunset, same as HA
 
 struct RtcState {
@@ -77,6 +77,9 @@ struct RtcState {
   uint32_t wake_count;
   uint8_t prev_pub;        // 0 = not connected, 1 = publish failed, 2 = queued, 3 = acked
   uint16_t prev_wait_ms;   // time waited for the ack
+  // The scheduled turn-on look (candles/schedule "look": [r, g, b, w, brightness], 0-255 each).
+  uint8_t look_valid;
+  uint8_t look[5];
 };
 static RTC_DATA_ATTR RtcState rtc;
 
@@ -279,10 +282,21 @@ static uint32_t plan_sleep(time_t now, int64_t cap_s, esphome::sun::Sun *sun, in
 }
 
 // The light's color/brightness/effect survive deep sleep through ESPHome's preferences (synced at
-// shutdown), so switching on/off from the schedule only has to change the state.
-static void apply_state(esphome::light::LightState *ls, bool on) {
+// shutdown), so switching off, or on without a look, only has to change the state.
+// look: switch on with the scheduled look (same mapping as HA's JSON light: rgb carries the color
+// brightness, w the white channel, brightness scales both).
+static void apply_state(esphome::light::LightState *ls, bool on, bool look = false) {
   auto call = ls->make_call();
   call.set_state(on);
+  if (on && look && rtc.look_valid) {
+    const uint8_t *v = rtc.look;
+    call.set_red(v[0] / 255.0f);
+    call.set_green(v[1] / 255.0f);
+    call.set_blue(v[2] / 255.0f);
+    call.set_color_brightness(std::max(v[0], std::max(v[1], v[2])) / 255.0f);
+    call.set_white(v[3] / 255.0f);
+    call.set_brightness(v[4] / 255.0f);
+  }
   call.perform();
   // The light writes the LED from its loop(). On an EVENT wake this runs during setup and the
   // candle sleeps before any loop() would run, so write it now.
@@ -452,11 +466,15 @@ static void on_schedule(JsonObjectConst x) {
     rtc.on = on;
     rtc.off = off;
     rtc.en = (x["en"] | 1) ? 1 : 0;
+    JsonArrayConst look = x["look"];
+    rtc.look_valid = look.size() == 5;
+    for (size_t i = 0; rtc.look_valid && i < 5; i++) rtc.look[i] = (uint8_t) constrain(look[i] | 0, 0, 255);
   } else {
     ESP_LOGW(TAG, "candles/schedule: can't parse on/off, keeping the previous rule");
   }
-  ESP_LOGI(TAG, "schedule en=%d on=%d/%d off=%d/%d", rtc.en, rtc.on.kind, rtc.on.minutes, rtc.off.kind,
-           rtc.off.minutes);
+  ESP_LOGI(TAG, "schedule en=%d on=%d/%d off=%d/%d look=%d:%u,%u,%u,%u,%u", rtc.en, rtc.on.kind,
+           rtc.on.minutes, rtc.off.kind, rtc.off.minutes, rtc.look_valid, rtc.look[0], rtc.look[1],
+           rtc.look[2], rtc.look[3], rtc.look[4]);
   wake.schedule_received = true;
 }
 
@@ -537,7 +555,9 @@ static void apply_offline(LightState *ls, Sun *sun) {
   if (schedule_known() && time_valid(now)) {
     bool on = scheduled_state(now, sun);
     ESP_LOGW(TAG, "offline: applying scheduled state %s", on ? "ON" : "OFF");
-    apply_state(ls, on);
+    // Switching on from off is the scheduled turn-on: use the look. Already on (HA set a color
+    // manually): keep it.
+    apply_state(ls, on, !ls->remote_values.is_on());
   } else {
     ESP_LOGW(TAG, "offline and no schedule/time known: leaving the light as is");
   }
@@ -552,7 +572,7 @@ static void apply_event(LightState *ls) {
     return;
   }
   wake.event_early_s = 0;
-  apply_state(ls, rtc.event_state != 0);
+  apply_state(ls, rtc.event_state != 0, true);  // the scheduled turn-on always uses the look
   rtc.last_event_target = rtc.event_target;
   rtc.last_event_actual = now;
 }
